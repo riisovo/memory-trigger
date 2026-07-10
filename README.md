@@ -7,7 +7,7 @@
 ## 一键安装
 
 ```bash
-npx skills add {{你的仓库路径}}
+npx skills add riisovo/memory-trigger
 ```
 
 ## 适用平台

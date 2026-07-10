@@ -24,7 +24,7 @@ AIGC:
 
 **作者**：riis  
 **版本**：1.0  
-**仓库**：`{{你的 GitHub 仓库链接}}`  
+**仓库**：[github.com/riisovo/memory-trigger](https://github.com/riisovo/memory-trigger)  
 **许可**：MIT——随意改、随便用，署个名就行
 
 ---
