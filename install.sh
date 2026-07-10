@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # memory-trigger 一键安装脚本
-# 用法: curl -fsSL https://raw.githubusercontent.com/riisovo/memory-trigger/main/install.sh | bash
+# 用法:
+#   curl -fsSL https://raw.githubusercontent.com/riisovo/memory-trigger/main/install.sh | bash
+#   npx github:riisovo/memory-trigger
 
 # --- Python3 预检测（macOS 12+ 不自带 python3）---
 PY=""
