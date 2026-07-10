@@ -14,11 +14,13 @@
 2. 将 `memory-trigger/` 目录复制到 Agent 的 skills 目录
 3. 参见 SKILL.md 第九章「首次部署指南」完成记忆后端安装（三选一）和文件初始化
 
-### 方式二：一键安装（即将上线）
+### 方式二：一键安装
 
 ```bash
-npx skills add riisovo/memory-trigger
+curl -fsSL https://raw.githubusercontent.com/riisovo/memory-trigger/main/install.sh | bash
 ```
+
+自动检测 skills 目录（Marvis / Claude Desktop），clone 仓库 → 初始化 → 跑自检，一条命令搞定。
 
 ## 适用平台
 
