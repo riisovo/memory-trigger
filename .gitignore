@@ -1,4 +1,14 @@
-# references/ 目录由初始化脚本（9.3）创建，Agent 运行时持续写入
-# 不纳入版本控制，每个用户本地独立维护
-references/
+# references/ 运行时数据不纳入版本控制，每个用户本地独立维护
+# 源码文件（write_pipeline.py / aliases.json / backend_config.json）正常跟踪
+references/memory.json
+references/entity_index.json
+references/preferences.json
+references/wellness.json
+references/promises.md
+references/.wal.jsonl
+references/.backup/
+references/.archive/
+references/.lock
+references/.export/
+references/.DS_Store
 .DS_Store

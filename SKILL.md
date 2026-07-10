@@ -709,7 +709,7 @@ memory-trigger/
 ├── SKILL.md                    # 本文件，唯一规则源
 └── references/
     ├── backend_config.json      # 后端模式配置（{"mode":"memorious"|"local"}）
-    ├── write_pipeline.py        # 【核心引擎】v2.3 真实写入脚本（归一化 + 分层 + 偏好翻转 + WAL）
+    ├── write_pipeline.py        # 【核心引擎】v2.4 真实写入脚本（归一化 + 分层 + 偏好翻转 + WAL）
     ├── aliases.json             # 实体别名映射表（Agent 维护，与 DEFAULT_ALIASES 保持同步）
     ├── memory.json             # 回忆原文库（Agent 自动写入，JSON 数组格式）
     ├── wellness.json           # 心情与健康日志（Agent 自动写入）
