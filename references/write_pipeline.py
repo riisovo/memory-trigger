@@ -2,24 +2,45 @@
 # -*- coding: utf-8 -*-
 """
 write_pipeline.py —— 记忆写入管线（真实工程实现，非 LLM 散文）
-===== PATCH v2.3 (by Plato) =====
-相对 v2.2 的改动（均带 `PATCH v2.3` 注释，逐函数定位）：
-  1) 新增 DEFAULT_ALIASES + normalize_entity()：写入前实体归一化，解决
-     「拉面」vs「那家拉面店」名字对不上→两条都 active→上下文打架。
-  2) cmd_write 支持 kind(=原 type) + sentiment(pos/neg/none) 字段；
-     upsert 去重维度从「仅 entity」改为「(entity, kind)」——偏好与事件
-     分层共存，不再互相覆盖。
-  3) 偏好翻转：同一 (entity, kind=preference) 的新值写入时，旧 active 自动
-     标 superseded（保留历史情绪，不删），检索只返回 active → 不污染。
-  4) cmd_recover 去重键从 entity 改为 (entity, memory_id)，修复重复写场景
-     静默丢数据。
-其余（锁/WAL/原子写/备份/崩溃恢复）沿用 v2.2 已验证实现。
+===== PATCH v2.6 (by Plato) =====
+相对 v2.3/v2.5 的改动（均带 `PATCH v2.6` 注释定位）：
+
+  【A 组：时间戳 / 召回追踪增强】
+  A1) 每条记忆新增 `last_recalled` 字段（初始 null）。cmd_search 命中即戳时间，
+      解决"只知写入时间、不知何时被用过"——支撑冷记忆衰减 / 热度加权。
+  A2) wellness 的 recorded_at 改用 ts_now()（与全库统一 UTC+8），去掉 astimezone() 双套机制。
+  A3) cmd_stats 新增"最久未召回"排行（last_recalled 为空则退回 created 计算）。
+
+  【B 组：信任优先级 / 源 / 情感 / 双向遗忘】
+  B1) source 标签：write 支持 --source {file_import|self_inferred|user_explicit}，
+      默认 auto_detect。self_inferred 且 confidence<阈值 → status=pending 不进 active，
+      防"幻觉固化"污染权威源。
+  B2) 情感 schema 扩展：kind 新增 relationship / emotion；新增可选 emotion_tags
+      列表（如 ["possessive","jealous","caring"]），让有感情基础的记忆不被压扁成 pos/neg。
+  B3) 检索源排序：结果标注 authority(file=file_import/user_explicit/auto_detect；
+      self=self_inferred)，file 优先；同实体多源冲突时，self 侧标 supplement=true 仅作补充。
+  B4) 双向遗忘 forget 命令：把记忆标 superseded，并写入 .suppressed.json + 生成
+      suppressed_prompt.md（"别再主动提 X"），让 agent 自身也"放下"，不只清文件。
+
+  【核心规则（信任优先级，固化进代码与 SKILL）】
+  文件记忆 > 自身印象。检索先查文件；文件空才用自身。自身印象定期单向沉淀进文件
+  （self_inferred 经用户确认后升级 active）。写内存的是缓存，文件是唯一权威源。
+
+  ★ 配套：merge_migrate.py 做"接入时双源合并迁移"，把本地文件 + agent 自述记忆
+    安全并成一套干净初始库（冲突以文件为准）。
 ==============================
 命令：
-  write <entity> <kind> <value> [refs_dir] [--mode local|memorious] [--sentiment pos|neg|none]
+  write <entity> <kind> <value> [refs_dir] [--mode local|memorious]
+        [--sentiment pos|neg|none|<自定义>] [--source file_import|self_inferred|user_explicit]
+        [--confidence 0..1] [--emotion-tags 逗号分隔] [--reason 文本]
   search <query> [refs_dir]
+  forget <entity|memory_id> [refs_dir] [--reason 文本] [--kind 类型]
   recover [refs_dir]
-  ...(其余命令同 v2.2)
+  stats [refs_dir]
+  vacuum [refs_dir]
+  backup [refs_dir]
+  wellness <mood> [sleep_hours] [sleep_quality] [note] [refs_dir]
+  init <mode> [refs_dir]
 """
 
 import fcntl
@@ -33,7 +54,16 @@ from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=8))  # UTC+8
 
-# === PATCH v2.3 === 默认别名归一化表（运行时优先读 aliases.json，兜底用此表）
+# === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
+ALLOWED_KINDS = {
+    "preference", "event", "habit", "rule", "scene",
+    "relationship", "emotion",
+    "identity", "milestone", "general",  # 与 SKILL.md §3.1 / §3.3 状态机对齐
+}
+# self_inferred 低于此置信度 → 落 pending（不进 active，防幻觉固化）
+SELF_INFERRED_PENDING_THRESHOLD = 0.8
+
+# === PATCH v2.3 === 默认别名归一化表
 DEFAULT_ALIASES = {
     "那家拉面店": "拉面",
     "那家拉面": "拉面",
@@ -106,8 +136,8 @@ def file_lock(refs_dir):
                             os.kill(locker_pid, 0)
                         except OSError:
                             os.close(fd)
-                            os.unlink(lock_path)
-                            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+                            # 不 unlink：truncate 就地复用同一 inode，保持锁互斥语义
+                            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_TRUNC)
                             deadline = time.time() + 30
                             continue
                 except (json.JSONDecodeError, KeyError):
@@ -117,15 +147,11 @@ def file_lock(refs_dir):
             time.sleep(0.5)
 
 def file_unlock(fd, refs_dir):
+    """只释放锁和关闭 fd，不 unlink 锁文件（保持 flock inode 互斥语义）。"""
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     except Exception:
-        pass
-    lock_path = os.path.join(refs_dir, ".lock")
-    try:
-        os.unlink(lock_path)
-    except FileNotFoundError:
         pass
 
 def wal_append(refs_dir, entry):
@@ -150,29 +176,39 @@ def backup_files(refs_dir):
         os.unlink(os.path.join(bkp_dir, oldest))
         all_bkps.pop(0)
 
-# === PATCH v2.3 === 实体归一化：别名表精确命中 → 默认表 → 反向子串（entity 含已有标准名）
+# === PATCH v2.3 === 实体归一化
 def normalize_entity(entity, refs_dir):
-    """把口语化/变体实体名映射到标准名，避免同一事物分裂成多条 active 记忆。"""
     alias_path = os.path.join(refs_dir, "aliases.json")
     aliases = safe_read_json(alias_path) or {}
     if entity in aliases:
         return aliases[entity]
     if entity in DEFAULT_ALIASES:
         return DEFAULT_ALIASES[entity]
-    # 反向子串：若本实体包含某个已存在的标准名（长度>=2，避免「面」过短误匹配），归一到它
     ei = safe_read_json(os.path.join(refs_dir, "entity_index.json")) or {"entities": {}}
     for std in ei.get("entities", {}).keys():
         if len(std) >= 2 and std != entity and std in entity:
             return std
     return entity
 
+# === PATCH v2.6 B1 === 源 → 权威层
+def authority_of(source):
+    """file 层：file_import / user_explicit / auto_detect（默认视为文件侧沉淀）
+       self 层：self_inferred（agent 自身印象，仅补充）"""
+    if source == "self_inferred":
+        return "self"
+    return "file"
+
 # ──────────────────────────────────────────
 # 核心命令
 # ──────────────────────────────────────────
 
-def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
-    """完整 upsert 写入管线（PATCH v2.3: 归一化 + kind/sentiment 分层）"""
-    # ── 0. 解析后端模式 ──
+def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+              source="auto_detect", confidence=1.0, emotion_tags=None, reason=None):
+    """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强）"""
+    # 校验 kind
+    if etype not in ALLOWED_KINDS:
+        raise ValueError(f"非法 kind='{etype}'，允许：{sorted(ALLOWED_KINDS)}")
+
     backend_path = os.path.join(refs_dir, "backend_config.json")
     config_mode = None
     if os.path.exists(backend_path):
@@ -192,9 +228,9 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
     if mode == "memorious":
         targets.append("memorious")
 
-    # === PATCH v2.3 === 写入前归一化：这是「记忆不打架」的总闸门
+    # === PATCH v2.3 === 写入前归一化
     entity = normalize_entity(entity, refs_dir)
-    kind = etype  # kind 语义 = 原 type 字段（preference / event / habit ...）
+    kind = etype
 
     fd = file_lock(refs_dir)
     try:
@@ -210,6 +246,9 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
             "type": etype,
             "kind": kind,
             "sentiment": sentiment,
+            "source": source,
+            "confidence": confidence,
+            "emotion_tags": emotion_tags or [],
             "memory_id": new_id,
             "targets": targets
         })
@@ -219,8 +258,6 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
         memory = safe_read_json(mem_path) or []
         ei = safe_read_json(ei_path) or {"version": 1, "entities": {}}
 
-        # === PATCH v2.3 === 去重维度改为 (entity, kind)：偏好与事件分层，互不覆盖
-        # 兼容旧 entry（只有 type 无 kind）用 entry.get("kind") or entry.get("type")
         existing_idx = None
         similar_idx = None
 
@@ -232,26 +269,39 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
                     if len(old_val) > 0 and old_val == value:
                         similar_idx = i
                         break
-                    elif len(old_val) > 20 and (value in old_val or old_val in value):
-                        similar_idx = i
-                        break
-                    else:
-                        existing_idx = i
-                        break
+                    if len(old_val) > 0 and len(value) > 0:
+                        old_bigrams = {old_val[j:j+2] for j in range(len(old_val)-1)}
+                        val_bigrams = {value[j:j+2] for j in range(len(value)-1)}
+                        intersection = old_bigrams & val_bigrams
+                        union = old_bigrams | val_bigrams
+                        if union and len(intersection) / len(union) > 0.7:
+                            similar_idx = i
+                            break
+                    existing_idx = i
+                    break
+
+        # === PATCH v2.6 B1 === 自推断低置信 → pending（不进 active，防幻觉固化）
+        if source == "self_inferred" and confidence < SELF_INFERRED_PENDING_THRESHOLD:
+            init_status = "pending"
+        else:
+            init_status = "active"
 
         def _make_entry():
             return {
                 "id": new_id,
                 "entity": entity,
                 "type": etype,
-                "kind": kind,            # === PATCH v2.3 ===
-                "sentiment": sentiment,  # === PATCH v2.3 ===
+                "kind": kind,
+                "sentiment": sentiment,
+                "source": source,                 # === PATCH v2.6 B1 ===
+                "confidence": confidence,         # === PATCH v2.6 B1 ===
+                "emotion_tags": emotion_tags or [],  # === PATCH v2.6 B2 ===
                 "value": value,
                 "created": ts_now(),
                 "updated": ts_now(),
-                "status": "active",
-                "source": "auto_detect",
-                "confidence": 1.0
+                "last_recalled": None,            # === PATCH v2.6 A1 ===
+                "status": init_status,
+                "reason": reason,
             }
 
         if similar_idx is not None:
@@ -259,9 +309,13 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
             memory[similar_idx]["updated"] = ts_now()
             if sentiment is not None:
                 memory[similar_idx]["sentiment"] = sentiment
+            if emotion_tags is not None:
+                memory[similar_idx]["emotion_tags"] = emotion_tags
+            memory[similar_idx]["source"] = source
+            memory[similar_idx]["confidence"] = confidence
             new_id = memory[similar_idx]["id"]
         elif existing_idx is not None:
-            # 内容不同（如偏好翻转：喜欢→讨厌）→ 旧 active 标 superseded，新建
+            # 内容不同（如偏好翻转）→ 旧 active 标 superseded，新建
             memory[existing_idx]["status"] = "superseded"
             memory.append(_make_entry())
         else:
@@ -274,7 +328,7 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
                 "count": 1,
                 "status": "confirmed",
                 "type": etype,
-                "kind": kind,                 # === PATCH v2.3 ===
+                "kind": kind,
                 "aliases": [],
                 "first_seen": ts_now(),
                 "last_seen": ts_now(),
@@ -326,6 +380,8 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
             "entity": entity,
             "kind": kind,
             "sentiment": sentiment,
+            "source": source,
+            "status_field": init_status,
             "mode": mode,
             "targets": targets
         }, ensure_ascii=False))
@@ -333,8 +389,26 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None):
     finally:
         file_unlock(fd, refs_dir)
 
+
+def _touch_recalled(mem_path, hit_ids):
+    """=== PATCH v2.6 A1 === 检索命中后戳 last_recalled（仅 active 命中）"""
+    if not hit_ids:
+        return
+    memory = safe_read_json(mem_path) or []
+    now = ts_now()
+    changed = False
+    for e in memory:
+        if e.get("id") in hit_ids and e.get("status") == "active":
+            e["last_recalled"] = now
+            changed = True
+    if changed:
+        safe_write_json(mem_path, memory)
+
+
 def cmd_search(query, refs_dir):
-    """本地检索（不依赖 memorious）；PATCH v2.3: 仅返回 active，结果含 kind/sentiment"""
+    """本地检索（不依赖 memorious）；PATCH v2.6: 仅返回 active，标注 authority + supplement"""
+    query = normalize_entity(query, refs_dir)
+
     mem_path = os.path.join(refs_dir, "memory.json")
     ei_path = os.path.join(refs_dir, "entity_index.json")
 
@@ -348,7 +422,8 @@ def cmd_search(query, refs_dir):
         mid = ent.get("last_memory_id")
         if mid:
             for entry in memory:
-                if entry.get("id") == mid and entry.get("entity") == query:
+                # === PATCH v2.6 B1 === 只回 active；pending/superseded 不进检索（防幻觉固化/已遗忘漏网）
+                if entry.get("id") == mid and entry.get("entity") == query and entry.get("status") == "active":
                     results.append({
                         "source": "entity_index",
                         "confidence": 0.95,
@@ -368,11 +443,33 @@ def cmd_search(query, refs_dir):
                     "entry": entry
                 })
 
+    # === PATCH v2.6 B3 === 源排序 + 冲突 supplement 标记
+    for r in results:
+        r["authority"] = authority_of(r["entry"].get("source", "auto_detect"))
+    # file 权威优先；同实体多源 → self 侧标 supplement
+    file_entities = {r["entry"]["entity"] for r in results if r["authority"] == "file"}
+    for r in results:
+        r["supplement"] = (r["authority"] == "self" and r["entry"]["entity"] in file_entities)
+    results.sort(key=lambda r: 0 if r["authority"] == "file" else 1)
+
+    # === PATCH v2.6 A1 === 命中即戳 last_recalled
+    hit_ids = [r["entry"]["id"] for r in results]
+    _touch_recalled(mem_path, hit_ids)
+
+    out = []
+    for r in results[:5]:
+        e = dict(r["entry"])
+        e["_authority"] = r["authority"]
+        e["_supplement"] = r["supplement"]
+        e["_match_source"] = r["source"]
+        out.append(e)
+
     print(json.dumps({
         "query": query,
         "results_count": len(results),
-        "results": results[:5]
+        "results": out
     }, ensure_ascii=False, indent=2))
+
 
 def cmd_stats(refs_dir):
     mem_path = os.path.join(refs_dir, "memory.json")
@@ -386,6 +483,7 @@ def cmd_stats(refs_dir):
     pending = sum(1 for e in entities.values() if e.get("status") == "pending")
     superseded = sum(1 for m in memory if m.get("status") == "superseded")
     active = sum(1 for m in memory if m.get("status") == "active")
+    pending_mem = sum(1 for m in memory if m.get("status") == "pending")
 
     type_counts = {}
     for e in entities.values():
@@ -395,17 +493,35 @@ def cmd_stats(refs_dir):
     timestamps = [m.get("created", "") for m in memory if m.get("created")]
     timestamps.sort()
 
+    # === PATCH v2.6 A3 === 最久未召回排行（last_recalled 为空退回 created）
+    now = datetime.now(TZ)
+    stale = []
+    for m in memory:
+        if m.get("status") != "active":
+            continue
+        ref = m.get("last_recalled") or m.get("created")
+        try:
+            dt = ts_parse(ref)
+            age_days = (now - dt).total_seconds() / 86400.0
+        except Exception:
+            age_days = 9999
+        stale.append((m.get("entity"), m.get("kind"), round(age_days, 2),
+                      m.get("last_recalled") or "(从未召回)"))
+
     print(json.dumps({
         "total_entities": len(entities),
         "pending": pending,
         "confirmed": confirmed,
         "total_memories": len(memory),
         "active": active,
+        "pending_memories": pending_mem,
         "superseded": superseded,
         "entity_kinds": type_counts,
         "oldest_memory": timestamps[0] if timestamps else None,
-        "newest_memory": timestamps[-1] if timestamps else None
+        "newest_memory": timestamps[-1] if timestamps else None,
+        "most_stale_active": sorted(stale, key=lambda x: -x[2])[:5],
     }, ensure_ascii=False, indent=2))
+
 
 def cmd_vacuum(refs_dir):
     mem_path = os.path.join(refs_dir, "memory.json")
@@ -438,9 +554,84 @@ def cmd_vacuum(refs_dir):
         "remaining": len(retained)
     }))
 
+
 def cmd_backup(refs_dir):
     backup_files(refs_dir)
     print(json.dumps({"status": "backed_up"}))
+
+
+def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
+    """=== PATCH v2.6 B4 === 双向遗忘：记忆标 superseded + 写 .suppressed.json
+       + 生成 suppressed_prompt.md（让 agent 自身也"放下"）"""
+    fd = file_lock(refs_dir)
+    try:
+        mem_path = os.path.join(refs_dir, "memory.json")
+        memory = safe_read_json(mem_path) or []
+
+        forgotten = []
+        for e in memory:
+            if e.get("status") != "active":
+                continue
+            match = (e.get("id") == entity_or_id) or (e.get("entity") == entity_or_id)
+            if kind:
+                e_kind = e.get("kind") or e.get("type")
+                match = match and (e_kind == kind)
+            if match:
+                e["status"] = "superseded"
+                e["updated"] = ts_now()
+                e["forgotten_at"] = ts_now()
+                if reason:
+                    e["forget_reason"] = reason
+                forgotten.append(e)
+
+        if not forgotten:
+            print(json.dumps({"status": "nothing_to_forget", "entity_or_id": entity_or_id}))
+            return
+
+        safe_write_json(mem_path, memory)
+
+        # 写 .suppressed.json
+        supp_path = os.path.join(refs_dir, ".suppressed.json")
+        supp = safe_read_json(supp_path) or {"suppressed": []}
+        for e in forgotten:
+            supp["suppressed"].append({
+                "entity": e.get("entity"),
+                "memory_id": e.get("id"),
+                "kind": e.get("kind") or e.get("type"),
+                "reason": reason,
+                "suppressed_at": ts_now(),
+            })
+        safe_write_json(supp_path, supp)
+
+        # 生成 suppressed_prompt.md（供贴进 agent 系统提示 / SOUL）
+        _regen_suppressed_prompt(refs_dir, supp)
+
+        print(json.dumps({
+            "status": "forgotten",
+            "count": len(forgotten),
+            "entities": [e.get("entity") for e in forgotten],
+            "suppressed_prompt_file": os.path.join(refs_dir, "suppressed_prompt.md"),
+        }, ensure_ascii=False))
+    finally:
+        file_unlock(fd, refs_dir)
+
+
+def _regen_suppressed_prompt(refs_dir, supp):
+    """根据 .suppressed.json 重新生成 suppressed_prompt.md"""
+    lines = ["# 已遗忘清单（双向遗忘）",
+             "",
+             "以下记忆已从文件标 superseded，且你（agent）自身也应放下，**不要主动提及**：",
+             ""]
+    for s in supp.get("suppressed", []):
+        ent = s.get("entity")
+        kind = s.get("kind")
+        reason = s.get("reason") or "用户要求遗忘"
+        lines.append(f"- ⚠️ 不要主动提及：**{ent}**（{kind}）— 原因：{reason}")
+    lines.append("")
+    lines.append("> 规则：文件是唯一权威源。被遗忘项既不从文件召回，也不从自身印象复述。")
+    with open(os.path.join(refs_dir, "suppressed_prompt.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
 
 def cmd_init(mode, refs_dir):
     os.makedirs(refs_dir, exist_ok=True)
@@ -448,10 +639,11 @@ def cmd_init(mode, refs_dir):
     os.makedirs(os.path.join(refs_dir, ".archive"), exist_ok=True)
 
     backend_path = os.path.join(refs_dir, "backend_config.json")
-    safe_write_json(backend_path, {
-        "mode": mode,
-        "backend_info": "Marvis 内置 memorious MCP" if mode == "memorious" else "纯本地文件模式"
-    })
+    if not os.path.exists(backend_path):
+        safe_write_json(backend_path, {
+            "mode": mode,
+            "backend_info": "Marvis 内置 memorious MCP" if mode == "memorious" else "纯本地文件模式"
+        })
 
     mem_path = os.path.join(refs_dir, "memory.json")
     if not os.path.exists(mem_path):
@@ -461,9 +653,9 @@ def cmd_init(mode, refs_dir):
     if not os.path.exists(ei_path):
         safe_write_json(ei_path, {"version": 1, "entities": {}})
 
-    # === PATCH v2.3 === 初始化时一并建立别名表（可被 runtime 改写）
     alias_path = os.path.join(refs_dir, "aliases.json")
     if not os.path.exists(alias_path):
+        safe_read_json  # noop
         safe_write_json(alias_path, DEFAULT_ALIASES)
 
     pref_path = os.path.join(refs_dir, "preferences.json")
@@ -472,7 +664,8 @@ def cmd_init(mode, refs_dir):
             "anchors": {},
             "preferences": {},
             "identity": {},
-            "persona": {}
+            "persona": {},
+            "external_sources": []
         })
 
     well_path = os.path.join(refs_dir, "wellness.json")
@@ -490,10 +683,9 @@ def cmd_init(mode, refs_dir):
         "refs_dir": refs_dir
     }))
 
+
 def cmd_recover(refs_dir):
-    """从 WAL 恢复崩溃时未完成持久化的写入。
-    === PATCH v2.3 === 去重键从 entity 改为 (entity, memory_id)，修复重复写场景丢数据
-    """
+    """从 WAL 恢复崩溃时未完成持久化的写入。去重键 (entity, memory_id)。"""
     wal_path = os.path.join(refs_dir, ".wal.jsonl")
     if not os.path.exists(wal_path):
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "no_wal_file"}))
@@ -507,13 +699,11 @@ def cmd_recover(refs_dir):
         return
 
     entries = [json.loads(l) for l in lines]
-
     committed = set()
     for e in entries:
         if e.get("op") == "commit":
             committed.add((e.get("entity"), e.get("memory_id")))
 
-    # === PATCH v2.3 === 按 (entity, memory_id) 精确去重，不再按 entity 名去重
     uncommitted_map = {}
     for e in entries:
         if e.get("op") != "upsert":
@@ -522,16 +712,9 @@ def cmd_recover(refs_dir):
         mid = e.get("memory_id", "")
         if (ent, mid) in committed:
             continue
-        if not mid and any(c[0] == ent for c in committed):
-            continue
-        if not mid:
-            if (ent, None) in committed or (ent, "") in committed:
-                continue
-        # 精确键：每条未提交 upsert 各保留一次，重复写不再被吞
         uncommitted_map[(ent, mid)] = e
 
     uncommitted = list(uncommitted_map.values())
-
     if not uncommitted:
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "all_committed"}))
         return
@@ -552,13 +735,14 @@ def cmd_recover(refs_dir):
                 e["value"],
                 refs_dir,
                 mode="local",
-                sentiment=e.get("sentiment")
+                sentiment=e.get("sentiment"),
+                source=e.get("source", "auto_detect"),
+                confidence=e.get("confidence", 1.0),
+                emotion_tags=e.get("emotion_tags"),
             )
             recovered.append(e["entity"])
         except Exception as ex:
-            print(json.dumps({
-                "error": f"recover failed for '{e['entity']}': {ex}"
-            }))
+            print(json.dumps({"error": f"recover failed for '{e['entity']}': {ex}"}))
 
     print(json.dumps({
         "status": "recovered" if recovered else "partial",
@@ -569,9 +753,7 @@ def cmd_recover(refs_dir):
 
 
 def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
-    import datetime as _dt
-    today = _dt.date.today().isoformat()
-
+    today = datetime.now(TZ).date().isoformat()   # === PATCH v2.6 A2 === 统一用 TZ
     well_path = os.path.join(refs_dir, "wellness.json")
     data = {"records": []}
     if os.path.exists(well_path):
@@ -581,7 +763,7 @@ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
     entry = {
         "date": today,
         "mood": mood,
-        "recorded_at": _dt.datetime.now().astimezone().isoformat()
+        "recorded_at": ts_now(),   # === PATCH v2.6 A2 === 改用 ts_now()，全库统一 UTC+8
     }
     if sleep_hours and sleep_hours != "-":
         entry["sleep_hours"] = float(sleep_hours)
@@ -611,38 +793,54 @@ def main():
         if cmd == "write":
             mode = None
             sentiment = None
+            source = "auto_detect"
+            confidence = 1.0
+            emotion_tags = None
+            reason = None
             nm_args = []
             i = 0
             while i < len(args):
                 if args[i] == "--mode" and i + 1 < len(args):
-                    mode = args[i + 1]
-                    i += 2
-                # === PATCH v2.3 === 解析 --sentiment
+                    mode = args[i + 1]; i += 2
                 elif args[i] == "--sentiment" and i + 1 < len(args):
-                    sentiment = args[i + 1]
-                    i += 2
+                    sentiment = args[i + 1]; i += 2
+                elif args[i] == "--source" and i + 1 < len(args):
+                    source = args[i + 1]; i += 2
+                elif args[i] == "--confidence" and i + 1 < len(args):
+                    confidence = float(args[i + 1]); i += 2
+                elif args[i] == "--emotion-tags" and i + 1 < len(args):
+                    emotion_tags = [t.strip() for t in args[i + 1].split(",") if t.strip()]; i += 2
+                elif args[i] == "--reason" and i + 1 < len(args):
+                    reason = args[i + 1]; i += 2
                 else:
-                    nm_args.append(args[i])
-                    i += 1
+                    nm_args.append(args[i]); i += 1
             if len(nm_args) < 3:
-                print(json.dumps({"error": "用法: write <entity> <kind> <value> [refs_dir] [--mode local|memorious] [--sentiment pos|neg|none]"}), file=sys.stderr)
+                print(json.dumps({"error": "用法: write <entity> <kind> <value> [refs_dir] [--mode local|memorious] [--sentiment ...] [--source file_import|self_inferred|user_explicit] [--confidence 0..1] [--emotion-tags 占有,吃醋] [--reason 文本]"}), file=sys.stderr)
                 sys.exit(1)
-            cmd_write(nm_args[0], nm_args[1], nm_args[2], refs_dir, mode, sentiment)
+            cmd_write(nm_args[0], nm_args[1], nm_args[2], refs_dir, mode, sentiment,
+                      source, confidence, emotion_tags, reason)
         elif cmd == "search":
-            mode = "local"
-            nm_args = []
-            i = 0
-            while i < len(args):
-                if args[i] == "--mode" and i + 1 < len(args):
-                    mode = args[i + 1]
-                    i += 2
-                else:
-                    nm_args.append(args[i])
-                    i += 1
+            nm_args = [a for a in args if not a.startswith("--")]
             if not nm_args:
                 print(json.dumps({"error": "用法: search <query> [refs_dir]"}), file=sys.stderr)
                 sys.exit(1)
             cmd_search(nm_args[0], refs_dir)
+        elif cmd == "forget":
+            reason = None
+            kind = None
+            nm_args = []
+            i = 0
+            while i < len(args):
+                if args[i] == "--reason" and i + 1 < len(args):
+                    reason = args[i + 1]; i += 2
+                elif args[i] == "--kind" and i + 1 < len(args):
+                    kind = args[i + 1]; i += 2
+                else:
+                    nm_args.append(args[i]); i += 1
+            if not nm_args:
+                print(json.dumps({"error": "用法: forget <entity|memory_id> [refs_dir] [--reason 文本] [--kind 类型]"}), file=sys.stderr)
+                sys.exit(1)
+            cmd_forget(nm_args[0], refs_dir, reason, kind)
         elif cmd == "stats":
             cmd_stats(refs_dir)
         elif cmd == "vacuum":

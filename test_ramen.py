@@ -93,7 +93,8 @@ def main():
         # T6 检索「拉面」返回的 active 里，preference 是阴性、event 可解释因果
         sr = run("search", "拉面", cwd=tmp)
         res = json.loads(sr.stdout)
-        ents = [r["entry"] for r in res["results"]]
+        # v2.6: 结果扁平化，直接是 entry（不再包 entry 层）
+        ents = res["results"]
         check("检索「拉面」至少有 1 条 active", len(ents) >= 1)
         pref_in_res = [e for e in ents if e.get("kind") == "preference"]
         check("检索结果里 preference 为最新阴性（不返回旧的喜欢）",

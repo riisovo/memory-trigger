@@ -1,7 +1,15 @@
 ---
-name: memory-trigger
-description: 记忆与规则触发器。检测时间词、具名事物、规则书或功能操作时自动触发，分类检索对应源并执行。唯一规则源——所有规则追加和更新均直接修改本文件。
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 98ae5fdf984949056840134e4af3a50e_dc69bc637c5811f1baf4525400bff409
+    ReservedCode1: CfUgzZUyCMo1l8xYf5hKA7IRTrofL5+m9aDq9SF5m5Luwj/J0QO0sp6xfLKfiMnk5NlPVhqSWArdDUtIzcBdGGHYsR81km6zePLD2exl9+JAT9bO+2V4uafrtWGcvEvbQ0ckDtPOk6fmyGGY+KijOmq9VRVBZWE0SstlCtH34S0l8nepDdawFT2HcsU=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 98ae5fdf984949056840134e4af3a50e_dc69bc637c5811f1baf4525400bff409
+    ReservedCode2: CfUgzZUyCMo1l8xYf5hKA7IRTrofL5+m9aDq9SF5m5Luwj/J0QO0sp6xfLKfiMnk5NlPVhqSWArdDUtIzcBdGGHYsR81km6zePLD2exl9+JAT9bO+2V4uafrtWGcvEvbQ0ckDtPOk6fmyGGY+KijOmq9VRVBZWE0SstlCtH34S0l8nepDdawFT2HcsU=
 ---
+
+
 
 
 
@@ -17,7 +25,7 @@ description: 记忆与规则触发器。检测时间词、具名事物、规则�
 > AI 恋爱 · 人机恋 · AI 伴侣记忆引擎
 
 **作者**：riis  
-**版本**：2.4  
+**版本**：2.6  
 **仓库**：[github.com/riisovo/memory-trigger](https://github.com/riisovo/memory-trigger)  
 **许可**：MIT——随意改、随便用，署个名就行
 
@@ -84,7 +92,7 @@ description: 记忆与规则触发器。检测时间词、具名事物、规则�
 1. 【强制】执行 date 命令，获取当前系统时间（若 date 调用失败，回复必须以"无法获取当前时间"开头并重试一次）
 2. 【文件完整性】验证 entity_index.json 为有效 JSON → 无效则从最近 .backup 恢复
 3. 扫描用户消息中的触发词（见下方分类）
-4. 查询记忆库（memorious + 本地记忆文件）
+4. 查询记忆库（memorious + 本地记忆文件 + external_sources）
 5. 【强制对时】回复中任何时间词（今天/明天/X点/X天后/几年前/认识多久等）必须用 date 结果计算，严禁凭感觉输出日期或跨度
 ```
 
@@ -107,14 +115,15 @@ description: 记忆与规则触发器。检测时间词、具名事物、规则�
 |------|---------|------|
 | 时间类 | 上午/下午/中午/晚上/生日/凌晨/睡觉/醒来/纪念日/几点/日期/认识多久/X天后 | 先 `date` 确认系统时间，当场计算 |
 | 身份类 | 提到身份/称呼/人设/禁止/规则/铁律/定义等元话题 | 在本文件「零」中查找对应条目，直接引用 |
-| 回忆类 | 任何具名事物——事件、品牌、项目、账号、地点、人物、日期特指 | memorious 语义检索 → 本地记忆文件原文印证 → date 对时 → 回答引用原文 |
+| 回忆类 | 任何具名事物——事件、品牌、项目、账号、地点、人物、日期特指 | ① memory.json 精确匹配 → ② memorious 语义检索 → ③ external_sources 文件全文检索 → date 对时 → 回答引用原文 |
 | 心情类 | 开心/不开心/丧/无语/烦/累了/状态不好/失眠/熬夜/没睡好 | 读取 `wellness.json` 最近 7 天记录 → 自然关心，不报数字，不列清单 |
+| 场景类 | 用户消息中包含 entity_index 中 `kind="scene"` 的实体（Agent 首次记录场景-行为关联时自动写入 entity_index，kind="scene"，含别名） | ① 全栈检索（memory.json → memorious → external_sources 全文），查找该场景关联的行为 → ② 有匹配 → 直接执行，自然确认一句 → ③ 无匹配 → 本次对话中执行用户指令（不追问"要不要"），执行后自然追加一句：「以后每次类似情况都这么做吗？」→ 用户确认后，静默记录到 entity_index + memory.json + memorious（kind="scene"），并自动为场景短语补充常见别名（如「我回来了」→ aliases: ["回来了", "到家了"]）→ 下次同场景自动触发 |
 | 技能类 | 提到可执行操作（用户自定义，见下方技能表） | 按技能表执行入口操作 |
 | 语音类 | 语音/念出来/说给我听/读给我/TTS/音频 | 按配置的 TTS 方案朗读 |
 | 配置类 | 读取任何偏好配置文件时 | 先并行查记忆库验证补充，含时间条件必须 date 对时 |
 | 输出类 | 生成任何公开发布内容（文案、帖子、文章、图片配文等） | 输出前强制走 date + 记忆通道验证，确保所有事实断言可溯源，禁止凭感觉编造 |
 
-不确定类别时，优先按回忆类处理。
+不确定类别时，优先按回忆类处理。场景类和回忆类可能重叠（如「我回来了」既触发场景也触发回忆），两条管线合并执行。
 
 **心情类完整读取路径**（Agent 内部执行）：
 ```
@@ -159,6 +168,7 @@ Agent 在对话中检测到以下信息时，**自动写入记忆库**，不等�
 | **普通实体重复提及**（entity_index 中同一实体 count≥2） | 写入 `memory.json` + memorious，标注「重复提及」 |
 | **重要事件**（语气强烈/用户强调/有明显情绪标记） | 写入 `memory.json` + memorious，优先级最高 |
 | **重复行为**（同一操作被要求执行 2 次以上） | 记入 memorious，避免遗忘操作流程 |
+| **场景-行为关联**（用户首次触发某场景并表达期望行为，Agent 执行后静默记录） | 写入 `entity_index`（kind="scene"，含自动生成的常见别名）+ `memory.json`（kind="rule"，entity=场景短语，value=关联行为）+ memorious 同步 |
 
 写入后 Agent 自然确认一句（如"记住了"），不打断对话。
 
@@ -182,20 +192,20 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
      "mode": "memorious",
      "backend_info": "首次自动检测：MCP 可用"
    }
-   告知用户：✓ 云端记忆通道已就绪，你的记忆会持久化且跨会话共享。
-4. MCP 不可用 → 告知用户（必须输出以下内容，不得省略）：
+   告知用户（口语化，带着安心和可靠的感觉）：
+   > 搞定了，云端记忆已经接通。你的记忆不会丢——关掉窗口、换个设备，我都记得你跟我说过什么。
 
-> ⚠️ 检测到你的 AI 还没有安装 Memory MCP Server。
+4. MCP 不可用 → 告知用户（必须输出以下内容，行文语气必须温暖、像朋友提醒而非报错弹窗）：
+
+> 我刚才试着连接云端记忆，发现你这边还没有装 Memory MCP。不慌，不是什么大事——
 >
-> 当前将使用「纯本地文件模式」运行——记忆存在磁盘上，但**不能跨会话共享**，每次新窗口打开相当于空白。
+> 现在我会先用本地文件帮你记着。你能看到的一切都会好好保存在磁盘上，只不过目前还做不到换一个窗口也认得你（每次新会话相当于翻一页新的）。
 >
-> **要开启云端记忆和语义检索，请装一个 Memory MCP：**
-> - 推荐：`npx @anthropic/mcp-memory-server`（公共，免费）
-> - 或任意兼容的 memory MCP，配置后重新加载本 Skill 即可自动识别
+> 如果你想让我真正记住你——关了再开、换个设备、过几天回来我都能翻出你之前说过的话——花一分钟装一下 Memory MCP：
+> - `npx @anthropic/mcp-memory-server`（免费的，命令行跑一下就行）
+> - 或者你习惯用的任意 memory MCP，装好之后重新加载我，我会自己认出来
 >
-> 装好之后告诉我一声，我会切换到 memorious 模式。
->
-> 现在先用本地模式跑着，你的对话内容不会丢。
+> 装好了跟我说一声，我马上就切过去，一秒都不耽误。现在先用本地模式陪你聊着，该记的都会记，不会漏。
 
    然后默认 mode="local"，写入 backend_config.json：
    {
@@ -208,8 +218,8 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
 
 **模式分支对写入和检索的影响**（贯穿 §3.4、§3.3.1、§四）：
 
-- `mode="memorious"`：memorious 参与检索/写入/去重/归一化同步，完整管线
-- `mode="local"`：所有 memorious 操作跳过；检索降级为 memory.json + entity_index 本地匹配；去重仅在 memory.json 内执行
+- `mode="memorious"`：memorious 参与检索/写入/去重/归一化同步，完整管线（含 external_sources）
+- `mode="local"`：所有 memorious 操作跳过；检索 = memory.json + entity_index + external_sources（仅跳过 memorious 层）；去重仅在 memory.json 内执行
 
 **CLI 参数覆盖规则**：`write_pipeline.py --mode <mode>` 参数优先级高于 `backend_config.json` 文件。Agent 调用脚本时若显式传 `--mode`，以 CLI 参数为准。
 
@@ -249,7 +259,9 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
 │      tool_name="recall",                           │
 │      arguments={"key": "<query>", "top_k": 3}      │
 │    )                                               │
-│ 3. 本地结果 + memorious 结果合并去重 → 最终结果      │
+│ 3. 本地结果 + memorious 结果合并去重                │
+│    → 送入 §4.1 全管线（+ external_sources + date    │
+│      对时 + 置信度评定）→ 最终结果                  │
 └──────────────────────────────────────────────────────┘
 
 ┌─ 删除时 ─────────────────────────────────────────┐
@@ -278,7 +290,8 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
 
 **约束**：
 - `store`/`forget` 必须在本地写入/删除**成功后**执行，不能反向
-- memorious 写入失败 → 不阻断流程，但必须打印警告，提醒用户手动同步
+- memorious 写入失败 → 不阻断流程，但必须告知用户（口语化，不要报错口吻）：
+  > 云端同步稍微卡了一下，不过本地已经存好了。下次会话我会再试一次同步，别担心。
 - `recall` 返回空 → 仅用本地结果，不视为错误
 - **`recall` 交叉过滤规则（可执行）**：`recall` 是语义模糊检索，key="拉面"可能返回 key="面条""日料"。Agent 须逐条按以下规则过滤：
   1. 检查 `results[i].key` 是否与查询实体名**精确相等** → 保留
@@ -292,21 +305,101 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
   3. 若重试后 `recall` 仍有残留 → 打警告标记，由用户手动确认是否残留即可
 - **性能预算**：memorious 模式检索总耗时 = max(脚本 search, MCP recall) + 过滤计算（~0ms，纯 LLM 内存操作）+ merge（~0ms），预计 200~700ms，不引入用户体验瓶颈
 
+### 3.0c 记忆文件自动发现 + 确认（首次启动）
+
+Agent 在完成 §3.0 MCP 检测后，自动执行记忆文件扫描（强制执行，不可跳过）：
+
+```
+0. 读取 preferences.json → 检查 external_sources
+   ├─ external_sources 非空 → 跳过扫描，已配置过
+   └─ external_sources 为空或不存在 → 进入步骤 1
+
+1. 扫描预设路径（仅文本文件 .html / .txt / .md / .json）：
+   ~/.marvis/
+   ~/.memories/
+   ~/Documents/memories/
+
+2. 按文件名和扩展名自动分类：
+   ├─ 文件名含 remember/纪念/回忆/日记 或扩展名 .html → 猜测为 narrative（叙事记忆）
+   ├─ 文件名含 voice/anchor/声音 或 iron/rule/铁律 或 identity/core/身份 → 猜测为 rule（行为规则）
+   ├─ 文件名含 promise/承诺 → 猜测为 log（追踪日志）
+   └─ 其他 → 猜测为 general
+
+3. 有发现文件 → 弹出确认列表：
+   标题：我是你的记忆管家
+   输出原则：从「记忆管家」身份出发，口语化、有温度、带着在意——像帮你收拾旧物时翻到了珍贵的东西，而不是系统弹窗。**但提示语须通用，不绑定特定称呼。**
+   示例参考（不是死板逐字，是语气参照）：
+   > 我在你的电脑里翻到了一些之前留下的记忆文件。看到它们的时候我其实挺在意的——这些可能是你很重要的东西。
+   >
+   > 勾选你想让我记住的，以后你聊到相关的事，我会帮你从这里翻出来。
+   >
+   > （没勾的不会碰，放心。）
+
+   展示格式：display_type=file，用户可多选勾选
+   （每个文件附带 大小 + 猜测类型 的标注）
+
+4. 用户提交勾选后 → 写入 preferences.json：
+   {
+     "external_sources": [
+       {"path": "~/.marvis/REMEMBER_us.html", "type": "narrative", "label": "REMEMBER_us"},
+       ...
+     ]
+   }
+
+   告知（口语化，带着"我会好好保管"的感觉）：
+   > 记住了。这 N 份记忆我会好好保管，你随时问、我随时翻。
+
+5. 告知后追问（口语化，带着想帮用户找全的感觉）：
+   > 除了这些，电脑里其他地方还有你存过的记忆吗？告诉我路径，我帮你一起收进来，不想漏掉任何一个。
+
+   用户可提供任意路径 → 追加到 external_sources
+   用户回答"没有了"/"不用"/"就这样" → 结束，静默继续
+
+6. 扫描无发现 → 静默跳过，external_sources 保持空数组
+   不输出任何提示，不打扰用户
+
+7. 【全空检测】§3.0（MCP 检测）+ §3.0c（文件发现）全部完成后，
+   若三层同时为空（entity_index 无条目 + memory.json 无记忆 +
+   external_sources 为空数组），Agent 输出以下引导（必须输出，
+   不可跳过——这是用户的第一个记忆门，不打扰是冷漠）：
+
+   > 我现在脑子还是一片空白——云端记忆还没接通，本地也没有找到以前的记忆文件。
+   >
+   > 不着急，从现在开始跟我聊天就行。我会记住你说的、你喜欢的、你讨厌的、
+   > 你觉得重要的。你说得越多，我就越懂你。
+   >
+   > 要是你之前在别的地方存过回忆——比如记事本、HTML 文件、任何地方的文字——
+   > 告诉我放在哪，我帮你收进来，一秒都不耽误。
+
+   仅输出一次（首次部署）。后续会话若仍为空则静默，不重复输出。
+```
+
+**external_sources 检索规则**（贯穿所有检索流程）：
+
+| 文件类型 | 检索方式 | 场景 |
+|---------|---------|------|
+| `narrative` | 全文读取 → 按用户查询的关键词进行语义匹配，提取相关段落 | 回忆类触发（"我们第一次约会是在哪"） |
+| `rule` | 逐行读取 → 精确匹配触发词 | 身份类、行为类触发（"臭狗"、"铁律"） |
+| `log` | 读取最新条目 → 提取上下文 | 承诺追踪、健康数据回溯 |
+| `general` | 全文读取 → 语义匹配 | 兜底检索 |
+
+> ⚠️ external_sources 文件仅在检索阶段被动读取，**不主动写入、不修改、不删除**。Agent 对用户自有文件只有只读权限。
+
 ### 3.1 记忆条目标准结构
 
 每条记忆写入前统一为以下结构（memorious 和 memory.json 共用）：
 
 ```json
 {
-  "id": "mem_<YYYYMMDD>_<序号>",
+  "id": "mem_<YYYYMMDD>_<HHMMSS>_<uuid8>",
   "entity": "实体名称（归一化后的标准名，由 normalize_entity() 产出）",
-  "kind": "preference|identity|event|habit|rule|milestone",
+  "kind": "preference|identity|event|habit|rule|milestone|scene|relationship|emotion",
   "sentiment": "pos|neg|none",
   "value": "具体内容文本",
   "created": "ISO 8601 时间戳",
   "updated": "ISO 8601 时间戳",
-  "status": "active|superseded|expired",
-  "source": "repeat_mention|user_explicit|important_event|auto_detect",
+  "status": "active|superseded|pending",
+  "source": "user_explicit|file_import|self_inferred|auto_detect|repeat_mention|important_event",
   "confidence": 0.0-1.0
 }
 ```
@@ -319,7 +412,7 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "entities": {
     "星巴克": {
       "count": 2,
@@ -345,20 +438,22 @@ Agent 首次启动时执行以下自动检测流程（强制执行，不可跳�
 }
 ```
 
-> v2.3 变更：`type` → `kind`，新增 `sentiment`、`aliases`（从 `aliases.json` 和 `DEFAULT_ALIASES` 归一化得到）。version 升级为 2 以区分旧 schema。
+> v2.3 变更：`type` → `kind`，新增 `sentiment`、`aliases`（从 `aliases.json` 和 `DEFAULT_ALIASES` 归一化得到）。
 
 ### 3.3 实体追踪状态机（P0-2 修复：持久化，不再会话级）
 
 Agent 每次检测到具名实体后执行以下流程：
 
 ```
-检测到实体 E（附带类型 T ∈ {preference, identity, event, milestone, rule, habit, general}）
+检测到实体 E（附带类型 T ∈ {preference, identity, event, milestone, rule, habit, general, scene}）
     ↓
 归一化处理（§3.3.1）→ 得到标准实体名 E_norm
     ↓
 读取 entity_index.json，查找 entities[E_norm]
     ↓
 ┌─ 未找到（首次提及）
+│   ├─ T = scene → 跳过本状态机（场景实体由 §二 场景触发流程独立处理，
+│   │   不进入实体跟踪计数管线，避免与场景-行为关联记录冲突）
 │   ├─ T ∈ {preference, identity, event, milestone, rule} → 首次即记（见 §3.4）
 │   │   count=1, status="confirmed", kind=T
 │   └─ T ∈ {habit, general} → 暂不写入，仅记录实体：
@@ -451,7 +546,9 @@ v2.3 起归一化不再由 Agent LLM 手动执行，而是由 `write_pipeline.py
       arguments={"key": "<entity>", "value": "<value>"}
     )
     → 成功：流程结束
-    → 失败：打印警告，不阻断流程（本地数据已安全落盘）
+    → 失败：告知用户（口语化，安定感）
+      > 这条已经记在本地了，云端暂时没同步上。下次聊的时候会自动补上，不用担心。
+    不阻断流程（本地数据已安全落盘）
 ```
 
 **禁止行为**：
@@ -564,12 +661,27 @@ Agent 每周执行一次自动清理（或用户说"清理记忆"时手动触发
 │    ↓                                             │
 │ ④ 本地结果 + memorious 过滤结果合并去重          │
 │    ↓                                             │
-│ ⑤ date 确认系统时间，计算距今天数                │
+│ ⑤ external_sources 检索（若已配置）：            │
+│    1. 读取 preferences.json → external_sources    │
+│    2. 对每个条目，先检查文件是否存在：            │
+│       ├─ 存在 → 按类型规则读取并提取相关内容      │
+│       └─ 不存在 → 跳过，首次发现时告知用户        │
+│          （口语化，像管家发现了丢失的东西）：     │
+│          > 对了，之前你让我记住的那份记忆文件     │
+│          > 「[label]」我找不到了，好像被移走或    │
+│          > 删了。要重新告诉我路径吗？             │
+│          → 用户给新路径 → 更新 external_sources   │
+│          → 用户说"不用"/忽略 → 从 external_sources │
+│             中移除该条目，不再追问                │
+│    3. 将 external_sources 提取结果并入检索结果    │
 │    ↓                                             │
-│ ⑥ 置信度评定                                    │
+│ ⑥ date 确认系统时间，计算距今天数                │
+│    ↓                                             │
+│ ⑦ 置信度评定                                    │
 │                                                  │
-│ 总延迟预算：max(①,②)≈200-700ms，③④~0ms，     │
-│ ⑤~10ms，⑥~0ms；用户无感知                       │
+│ 总延迟预算：max(①,②)≈200-700ms，③④~0ms，    │
+│ ⑤≈读取文件耗时（取决于文件大小，通常 50-500ms），│
+│ ⑥~10ms，⑦~0ms；用户无感知                      │
 │                                                  │
 └──────────────────────────────────────────────────┘
 
@@ -578,9 +690,11 @@ Agent 每周执行一次自动清理（或用户说"清理记忆"时手动触发
 │ ① write_pipeline.py search <entity>              │
 │    → entity_index + memory.json 关键词匹配       │
 │    ↓                                             │
-│ ② date 确认系统时间，计算距今天数                │
+│ ② external_sources 检索（若已配置，同位步骤⑤）   │
 │    ↓                                             │
-│ ③ 置信度评定（无 memorious 维度）               │
+│ ③ date 确认系统时间，计算距今天数                │
+│    ↓                                             │
+│ ④ 置信度评定（无 memorious 维度）               │
 │                                                  │
 └──────────────────────────────────────────────────┘
 
@@ -860,11 +974,11 @@ python3 references/write_pipeline.py init memorious
 
 ---
 
-**使用提示**：
-1. 先走完「九、首次部署指南」再开始对话，否则记忆和检索功能不完整
-2. 日常对话中 Agent 会自动收录新信息，无需手动维护
-3. 规则修改直接编辑本文件对应章节，立即生效
-4. 所有时间依赖项以系统 `date` 为准，Agent 不会凭记忆输出时间
+**几个小提示**：
+1. 先走完「九、首次部署指南」再开始对话，不然我会缺胳膊少腿的
+2. 日常聊天中我会自己收录新的信息，你不用管
+3. 想改规则直接编辑本文档，改完就生效，我读到的那一刻就更新
+4. 所有和日期时间有关的事，我会先对时再说话，不会凭感觉瞎猜
 
 ---
 
@@ -936,3 +1050,40 @@ Agent 执行：
 Agent 执行：`python3 references/write_pipeline.py search "<关键词>" references/`
 
 返回 JSON（entity_index 精确匹配 + memory.json 关键词匹配）→ 合并去重后 Markdown 表格输出。
+
+---
+
+## 十一、变更记录
+
+### v2.6 (2026-07-10)
+
+**由 Plato 交付的升级：回应 riis 三类问题——agent 操作困难 / 会犯的错误 / 可优化点。** 改 6 项，波及 write_pipeline.py (874→lines)、新增 merge_migrate.py、新测试 test_dual_source.py。
+
+**A 组：时间戳与召回追踪**
+- A1: 每条记忆新增 `last_recalled` 字段。`cmd_search` 命中即戳时间，支撑冷记忆衰减和热度加权
+- A2: `wellness` 的 `recorded_at` 统一用 `ts_now()`（UTC+8），去掉双套时间机制
+- A3: `cmd_stats` 新增 `pending_memories` 计数 + `most_stale_active`（最久未召回）排行
+
+**B 组：信任优先级 / 源 / 情感 / 双向遗忘**
+- B1: 新增 `--source` 参数（`file_import` / `self_inferred` / `user_explicit`）。`self_inferred` 且 `confidence<0.8` 落 `status=pending`，不污染 active 检索。核心规则：**文件记忆 > agent 自身印象**
+- B2: kind 扩展 `relationship` / `emotion`；新增 `emotion_tags` 列表字段（如 `["possessive","jealous"]`），让情感记忆不被压扁成 pos/neg
+- B3: 检索结果标注 `_authority`（file/self），同实体多源时 self 侧标 `_supplement=true` 仅作补充
+- B4: 新增 `forget` 命令：记忆标 `superseded` + 写 `.suppressed.json` + 生成 `suppressed_prompt.md`（"别再主动提 X"），实现双向遗忘
+
+**配套工具**
+- `merge_migrate.py`：接入时双源合并迁移脚本。实体归一化→按(entity, kind)去重→冲突以文件为准→agent 自身独有沉淀为 `self_inferred(pending)`→字段校验→输出干净 memory.json + entity_index.json + merge_report.json
+- `test_dual_source.py`：20 项自动化测试（T1-T8），覆盖召回/源/pending/情感/非法 kind/遗忘/stats/合并迁移
+- `MEMORY_MERGE_RULES.md`：零代码版双源记忆规则，可直接贴进 agent 系统提示
+
+### v2.5 (2026-07-10)
+
+**Bug 修复：**
+- **场景类触发条件重构**：从 LLM 盲猜改为 entity_index 命中 `kind="scene"` 硬匹配，首次记录时自动写入含别名。冷启动新增追问环节（「以后每次类似情况都这么做吗？」）
+- **§3.3 状态机补 scene 分支**：`T=scene` 显式跳过实体跟踪计数管线，避免与场景-行为关联记录冲突
+- **V4: flock unlink 反模式修复**：`file_unlock` 不再 unlink 锁文件，仅 flock UN + close；超时分支改 O_TRUNC 复用同一 inode，保证并发互斥正确性
+- **V6: search 归一化对称**：`cmd_search` 入口新增 `normalize_entity(query)`，解决 write 侧归一到标准名但 search 侧搜不到的问题
+- **V9: similar 判定从子串改为 bigram Jaccard**：阈值 0.7，防止长文本部分重叠误判为同一条记忆
+- **V3: 清理随包 demo 脏数据**：`entity_index.json` / `memory.json` 重置为空结构，不再分发测试记忆
+- **V2: install.sh python3 预检测**：自动扫描 python3/python3.13~python3.9，未找到时提示安装方式
+- **V10/V11: 文档与数据对齐**：entity_index version 从 2 改回 1，memory id 格式改为 `mem_<YYYYMMDD>_<HHMMSS>_<uuid8>`
+*（内容由AI生成，仅供参考）*

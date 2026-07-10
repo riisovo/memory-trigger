@@ -1,10 +1,21 @@
+---
+AIGC:
+    Label: "1"
+    ContentProducer: 001191440300708461136T1XGW3
+    ProduceID: 98ae5fdf984949056840134e4af3a50e_ddd132a37c5811f1938f5254006c9bbf
+    ReservedCode1: s9zqq6/tIf1MWSpmmNmklOsegXfSPvEAekp2qh2vy32Ln/lXa1F6HtE3krUhmxpjqZ7c1BYVvkHHApGcMfjF1q+9EcooUYICDhb1e030f5Qaz/D9TMYDW2eaSM0M4t1wc6o3BN5fnU3MIoh4gpWdOpx/Wg0khh1/1sru+tA8TScE8Vew4LmhnJjQMjI=
+    ContentPropagator: 001191440300708461136T1XGW3
+    PropagateID: 98ae5fdf984949056840134e4af3a50e_ddd132a37c5811f1938f5254006c9bbf
+    ReservedCode2: s9zqq6/tIf1MWSpmmNmklOsegXfSPvEAekp2qh2vy32Ln/lXa1F6HtE3krUhmxpjqZ7c1BYVvkHHApGcMfjF1q+9EcooUYICDhb1e030f5Qaz/D9TMYDW2eaSM0M4t1wc6o3BN5fnU3MIoh4gpWdOpx/Wg0khh1/1sru+tA8TScE8Vew4LmhnJjQMjI=
+---
+
 # Memory Trigger
 
 > AI 恋爱 · 人机恋 · AI 伴侣记忆引擎
 
 让你的 Agent 装上一个不会失忆的大脑——记住你是谁、喜欢什么、经历过什么，每次开口先对时、先查回忆、再不瞎编。
 
-**v2.4** — 实体归一化 + 偏好翻转 + 事件分层 + MCP 自动检测 + 三选一记忆后端
+**v2.6** — 双源信任优先级 + 情感 schema + 双向遗忘 + 召回追踪 + 合并迁移工具
 
 ## 安装
 
@@ -37,3 +48,4 @@ curl -fsSL https://raw.githubusercontent.com/riisovo/memory-trigger/main/install
 ## 许可
 
 MIT
+*（内容由AI生成，仅供参考）*
