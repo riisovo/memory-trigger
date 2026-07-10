@@ -1,0 +1,4 @@
+# references/ 目录由初始化脚本（9.3）创建，Agent 运行时持续写入
+# 不纳入版本控制，每个用户本地独立维护
+references/
+.DS_Store
