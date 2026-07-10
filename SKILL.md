@@ -17,7 +17,7 @@ description: 记忆与规则触发器。检测时间词、具名事物、规则�
 > AI 恋爱 · 人机恋 · AI 伴侣记忆引擎
 
 **作者**：riis  
-**版本**：2.3  
+**版本**：2.4  
 **仓库**：[github.com/riisovo/memory-trigger](https://github.com/riisovo/memory-trigger)  
 **许可**：MIT——随意改、随便用，署个名就行
 
@@ -162,25 +162,49 @@ Agent 在对话中检测到以下信息时，**自动写入记忆库**，不等�
 
 写入后 Agent 自然确认一句（如"记住了"），不打断对话。
 
-### 3.0 记忆后端模式
+### 3.0 记忆后端模式（Agent 自动检测，首次使用触发）
 
-Agent 启动时读取 `references/backend_config.json`（部署时由初始化脚本写入，不存在则默认 local）：
+Agent 首次启动时执行以下自动检测流程（强制执行，不可跳过）：
 
-```json
-{
-  "mode": "memorious",
-  "backend_info": "Marvis 内置 memorious MCP"
-}
+```
+1. 读取 references/backend_config.json
+   ├─ 存在且 mode 为 "memorious" 或 "local" → 按已有配置执行，跳过后续步骤
+   └─ 不存在 → 进入步骤 2
+2. 检测 MCP 环境：
+   ├─ Marvis 用户 → 调用 list_mcp_tools(server="memorious")
+   │   ├─ 返回工具列表 → MCP 可用，设置 mode="memorious"，进入步骤 3
+   │   └─ 返回空/报错 → 进入步骤 4
+   └─ 非 Marvis 用户 → 尝试调用 list_mcp_tools 检测是否已有 memory MCP 注册
+       ├─ 找到 memory 类 server → 让用户选择用哪个
+       └─ 未找到 → 进入步骤 4
+3. 写入 backend_config.json：
+   {
+     "mode": "memorious",
+     "backend_info": "首次自动检测：MCP 可用"
+   }
+   告知用户：✓ 云端记忆通道已就绪，你的记忆会持久化且跨会话共享。
+4. MCP 不可用 → 告知用户（必须输出以下内容，不得省略）：
+
+> ⚠️ 检测到你的 AI 还没有安装 Memory MCP Server。
+>
+> 当前将使用「纯本地文件模式」运行——记忆存在磁盘上，但**不能跨会话共享**，每次新窗口打开相当于空白。
+>
+> **要开启云端记忆和语义检索，请装一个 Memory MCP：**
+> - 推荐：`npx @anthropic/mcp-memory-server`（公共，免费）
+> - 或任意兼容的 memory MCP，配置后重新加载本 Skill 即可自动识别
+>
+> 装好之后告诉我一声，我会切换到 memorious 模式。
+>
+> 现在先用本地模式跑着，你的对话内容不会丢。
+
+   然后默认 mode="local"，写入 backend_config.json：
+   {
+     "mode": "local",
+     "backend_info": "首次自动检测：MCP 不可用"
+   }
 ```
 
-或：
-
-```json
-{
-  "mode": "local",
-  "backend_info": "纯本地文件模式"
-}
-```
+**已有配置的手动切换**：用户可通过修改 `references/backend_config.json` 中的 `mode` 字段在 `memorious` 和 `local` 之间切换，下次 Agent 启动时自动按新配置执行。
 
 **模式分支对写入和检索的影响**（贯穿 §3.4、§3.3.1、§四）：
 
