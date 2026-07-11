@@ -57,7 +57,9 @@ fi
 cd "$TARGET"
 
 # 初始化本地文件结构
-if [ ! -f "references/backend_config.json" ]; then
+# 注意：用 memory.json 判断（它永远被 .gitignore 忽略、不进仓库，clone 后必然缺失 → 必触发 init；
+# 而 backend_config.json 已跟踪进仓库，用它会让 init 在全新安装时永远跳过，导致 preferences.json 等运行时文件建不出来）
+if [ ! -f "references/memory.json" ]; then
   echo "初始化记忆后端..."
   $PY references/write_pipeline.py init local
 fi
