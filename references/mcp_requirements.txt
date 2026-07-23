@@ -1,0 +1,4 @@
+# memory-trigger MCP Server 依赖（Python 3.10+）
+# 安装：pip install -r references/mcp_requirements.txt
+# 或用 uv：uv pip install -r references/mcp_requirements.txt
+mcp[cli]>=1.2.0

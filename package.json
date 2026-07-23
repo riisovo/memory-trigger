@@ -1,0 +1,28 @@
+{
+  "name": "memory-trigger",
+  "version": "2.7.0",
+  "description": "AI 伴侣记忆引擎 — 让 Agent 记住你是谁、怎么叫你、你喜欢什么、你们经历过什么",
+  "bin": {
+    "memory-trigger": "./install.sh"
+  },
+  "files": [
+    "install.sh",
+    "SKILL.md",
+    "README.md",
+    "MEMORY_RULES.md",
+    "SHARE.md",
+    "references/",
+    "scripts/",
+    "test_dual_source.py"
+  ],
+  "keywords": [
+    "ai",
+    "memory",
+    "companion",
+    "agent",
+    "skill"
+  ],
+  "author": "riis",
+  "license": "MIT",
+  "repository": "github:riisovo/memory-trigger"
+}

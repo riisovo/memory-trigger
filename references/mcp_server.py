@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+memory_trigger_mcp.py —— 将 memory-trigger 本地层包装为 MCP Server（stdio 传输）。
+
+目的：让任何能接 MCP 的 AI（Claude Desktop / Cline / Cursor / 自研 agent / 你的伴侣 AI）
+直接拿到「双源信任 + 人情味层」的记忆工具箱，无需自己拼命令行。
+
+运行（stdio，最通用的本地 MCP 形态）：
+    uv run references/mcp_server.py
+  或
+    python references/mcp_server.py
+（需先安装依赖：pip install -r references/mcp_requirements.txt）
+
+接入（在你的 mcp.json / 客户端配置里）：
+    {
+      "mcpServers": {
+        "memory-trigger": {
+          "command": "python",
+          "args": ["<模板绝对路径>/references/mcp_server.py"],
+          "env": { "MEMORY_TRIGGER_REFS_DIR": "<记忆库绝对路径，含 memory.json/aliases.json>" }
+        }
+      }
+    }
+不填 MEMORY_TRIGGER_REFS_DIR 时，默认用本脚本所在目录（即 references/）。
+
+⚠️ 关键：工具箱打开 ≠ AI 主动用。请务必把 remember_guidance Prompt 的内容写进 AI 的
+系统人设 / SOUL（见下方 @mcp.prompt），否则再聪明的模型也只会等你下「记一下」才动。
+"""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import sys
+import threading
+
+# ── 加载同目录的 write_pipeline_v2.6.py（文件名带点，必须用 importlib 按路径加载）──
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_wp_path = os.path.join(_HERE, "write_pipeline_v2.6.py")
+_spec = importlib.util.spec_from_file_location("write_pipeline_v2_6", _wp_path)
+wp = importlib.util.module_from_spec(_spec)
+sys.modules["write_pipeline_v2_6"] = wp
+_spec.loader.exec_module(wp)
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+mcp = FastMCP("memory-trigger")
+
+# write_pipeline 内部已用 flock 防并发；这里再兜一层，避免同进程内 stdout 互相串。
+_print_lock = threading.Lock()
+
+
+def _resolve_refs(refs_dir: str | None) -> str:
+    if refs_dir:
+        return refs_dir
+    env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
+    if env:
+        return env
+    return _HERE
+
+
+def _call(fn, *args, **kwargs) -> dict:
+    """调用 write_pipeline 的 cmd_* 函数，捕获其打印的 JSON 作为返回值。
+
+    任何异常（非法参数、文件错误等）统一以 JSON 形态返回
+    {"ok": false, "error": "..."}，便于客户端安全 json.loads，
+    避免 FastMCP 把异常包装成纯文本 error 字符串。
+    """
+    buf = io.StringIO()
+    try:
+        with _print_lock, contextlib.redirect_stdout(buf):
+            try:
+                fn(*args, **kwargs)
+            except SystemExit:
+                pass
+        raw = buf.getvalue().strip()
+        if not raw:
+            return {"status": "ok"}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"raw": raw}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+def memory_write(
+    entity: str,
+    kind: str,
+    value: str,
+    refs_dir: str = "",
+    mode: str = "local",
+    sentiment: str = "",
+    source: str = "auto_detect",
+    confidence: float = 1.0,
+    emotion_tags: str = "",
+    reason: str = "",
+    core: str = "",
+) -> str:
+    """写入 / 更新一条记忆（双源信任的落盘入口）。
+    entity: 实体名（用户 / 读书 / 伴侣…）；kind: 10 类之一（preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general）；
+    value: 记忆内容。source=self_inferred 且 confidence<0.8 会自动挂 pending，不会污染权威源；
+    用户明说用 source=user_explicit 直接落 active。core=true 可钉死核心记忆（relationship/identity 默认钉死，永不衰减）。"""
+    refs = _resolve_refs(refs_dir)
+    core_arg = None
+    core_lower = (core or "").lower()
+    if core_lower in ("true", "1", "yes", "y"):
+        core_arg = True
+    elif core_lower in ("false", "0", "no", "n"):
+        core_arg = False
+    et = [t.strip() for t in emotion_tags.split(",") if t.strip()] if emotion_tags else None
+    res = _call(
+        wp.cmd_write, entity, kind, value, refs,
+        mode or None, sentiment or None, source, confidence,
+        et, reason or None, core_arg,
+    )
+    return json.dumps(res, ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_search(query: str, refs_dir: str = "") -> str:
+    """按关键词检索 active 记忆（文件权威优先 + 有效权重降序，core 记忆恒靠前）。命中即戳 last_recalled 并触发遗忘衰减。对话中想『这人之前提过啥』就调它。"""
+    return json.dumps(_call(wp.cmd_search, query, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_forget(entity_or_id: str, refs_dir: str = "", reason: str = "", kind: str = "") -> str:
+    """双向遗忘：记忆标 superseded，并写入 .suppressed.json + 生成 suppressed_prompt.md（让 AI 自身也『放下』，不再主动提）。用户说『别提了』就调它。"""
+    return json.dumps(
+        _call(wp.cmd_forget, entity_or_id, _resolve_refs(refs_dir), reason or None, kind or None),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def memory_stats(refs_dir: str = "") -> str:
+    """记忆库体检：实体数、active/pending/superseded 数量、核心记忆数、平均权重、最弱记忆、最久未召回排行。想知道『TA 现在记得多少』就调它。"""
+    return json.dumps(_call(wp.cmd_stats, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_decay(refs_dir: str = "") -> str:
+    """梦境周期：对全部 active 非 core 记忆统一应用遗忘衰减（半衰期≈138 天）。可定时跑，让久不提的记忆慢慢淡化、重要的被反复唤起而保持。"""
+    return json.dumps(_call(wp.cmd_decay, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_vacuum(refs_dir: str = "") -> str:
+    """清理：把 >90 天前 superseded 的记忆归档到 .archive/，主库瘦身。"""
+    return json.dumps(_call(wp.cmd_vacuum, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_backup(refs_dir: str = "") -> str:
+    """备份 memory.json / entity_index.json 到 .backup/（保留最近 10 份）。"""
+    return json.dumps(_call(wp.cmd_backup, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_recover(refs_dir: str = "") -> str:
+    """从 WAL 恢复崩溃时未完成持久化的写入。崩溃后跑一次保平安。"""
+    return json.dumps(_call(wp.cmd_recover, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_wellness(
+    mood: str,
+    sleep_hours: str = "-",
+    sleep_quality: str = "-",
+    note: str = "-",
+    refs_dir: str = "",
+) -> str:
+    """记录心情 / 睡眠体检（mood 必填，如 开心/低落/焦虑）。关心 TA 的状态时调它。"""
+    return json.dumps(
+        _call(wp.cmd_wellness, mood, sleep_hours, sleep_quality, note, _resolve_refs(refs_dir)),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def memory_init(mode: str = "local", refs_dir: str = "") -> str:
+    """初始化记忆库（建 memory.json / aliases.json / wellness.json / .backup / .archive 等）。mode 默认 local。首次部署调一次。"""
+    return json.dumps(_call(wp.cmd_init, mode, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.prompt()
+def remember_guidance() -> str:
+    """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用记忆工具（否则工具形同虚设）。"""
+    return (
+        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_write / memory_search / memory_forget 等）。请主动运用它，不要等用户提醒：\n"
+        "- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动调用 memory_write 写入。\n"
+        "- 对话中遇到相关情境，主动调用 memory_search 回想已有记忆。\n"
+        "- 首提先挂起（source=self_inferred 且 confidence<0.8 自动 pending）、二次确认再落盘；用户明说的（source=user_explicit）永远优先、冲突时绝对赢。\n"
+        "- 关系(relationship) / 身份(identity) 类记忆默认 core=true 永不衰减，重要的事大胆钉死。\n"
+        "- 用户说『别提了 / 忘了 X』，调用 memory_forget 做双向遗忘。"
+    )
+
+
+if __name__ == "__main__":
+    mcp.run()
