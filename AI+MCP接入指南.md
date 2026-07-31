@@ -66,7 +66,7 @@ python -c "import mcp; print('ok')"
 首次接上后，让你的 AI 调一次 `memory_init`，或者手动跑：
 
 ```bash
-python references/write_pipeline_v2.6.py init /你的记忆库路径
+python references/write_pipeline.py init /你的记忆库路径
 ```
 
 会生成 `memory.json` / `aliases.json` / `wellness.json` 等文件，记忆库就建好了。
@@ -85,6 +85,8 @@ python references/write_pipeline_v2.6.py init /你的记忆库路径
 ```
 
 嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt，内容就是上面这段，复制进 SOUL 即可。
+
+> 上面这段是 **MCP 专用版**（点名了工具名），与 README §『让 AI 主动记』的**通用版**同源——通用版不绑定 MCP、适用于命令行 / 直接读 SKILL 的宿主。**两者只差是否点名工具，记忆自觉的核心要求完全一致；改指令以 README 通用版为准。**
 
 ---
 

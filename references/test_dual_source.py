@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
-WP = os.path.join(HERE, "write_pipeline_v2.6.py")
+WP = os.path.join(HERE, "write_pipeline.py")
 MM = os.path.join(HERE, "merge_migrate.py")
 
 PASS = 0
@@ -49,7 +49,7 @@ def section(t):
 
 # ──────────────────────────────────────────
 def test_recall_and_source_and_emotion():
-    section("T1-T5 write_pipeline_v2.6：召回/源/情感/遗忘")
+    section("T1-T5 write_pipeline：召回/源/情感/遗忘")
     d = tempfile.mkdtemp(prefix="wp26_")
     run(WP, "init", "local", d)
 

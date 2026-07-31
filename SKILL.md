@@ -6,7 +6,7 @@ version: 2.7
 
 # memory-trigger —— 双源记忆模板（含人情味层）
 
-给 agent 挂一份**本地权威**的长期记忆：用户说的直接写文件，agent 自己的印象只作补充、低置信先挂起，冲突时以文件为准。核心脚本 `references/write_pipeline_v2.6.py`，迁移/校验用 `references/merge_migrate.py`，双源逻辑自检 `references/test_dual_source.py`。
+给 agent 挂一份**本地权威**的长期记忆：用户说的直接写文件，agent 自己的印象只作补充、低置信先挂起，冲突时以文件为准。核心脚本 `references/write_pipeline.py`，迁移/校验用 `references/merge_migrate.py`，双源逻辑自检 `references/test_dual_source.py`。
 
 **零依赖**：脚本是纯标准库（fcntl/json/os），只要有 `python3` 就能跑，连 `pip install` 都不用。**各家 agent 把模板 clone 到自己的机器、跑脚本，记忆存在自己本地的 `memory.json`，物理隔离、不共享。**
 
@@ -23,22 +23,18 @@ version: 2.7
 
 > 实现上：双源信任 = §3.2 `source` 枚举 + §3.3 `status` 状态机 + §5 双源冲突规则 三者合力。下文是 concrete 行为规范。
 
-> **⚠️ 接入必做（尤其 AI 版本 / 非 agent 宿主）**：本模板的「主动记忆」不靠模型自醒，靠系统人设里的一句指令。请把下面这段加进你的 SOUL / 系统人设 / 系统提示——否则再聪明的模型（含 Claude）也只会干坐着等你说「记一下」，记忆工具连着也不会自己调：
-> ```
-> 【记忆自觉】你已配置 memory-trigger 长期记忆。请主动运用它，不要等用户提醒：用户透露偏好/关系/重要事件/习惯/红线/身份时主动写入；相关情境主动回想；首提先挂起、二次确认再落盘，用户明说永远优先。
-> ```
-> agent 宿主读本文档即自带此自觉；其余宿主务必手动加这句，记忆工具才真正被用起来。
+> **⚠️ 接入必做（尤其 AI 版本 / 非 agent 宿主）**：本模板的「主动记忆」不靠模型自醒，靠系统人设里的一句指令。**完整「记忆自觉」指令（通用版）见 README §『让 AI 主动记』，把它复制进你的 SOUL / 系统人设 / 系统提示**——否则再聪明的模型（含 Claude）也只会干坐着等你说「记一下」，记忆工具连着也不会自己调。agent 宿主读本文档即自带此自觉；其余宿主务必手动加这句，记忆工具才真正被用起来。
 
 ## 1. 快速上手
 
 ```bash
 bash install.sh                 # 零依赖自检（引擎冒烟 + 双源自检，纯标准库无需 pip）
-python3 references/write_pipeline_v2.6.py write "读书" preference "爱吃科幻小说" references/
-python3 references/write_pipeline_v2.6.py write "伙伴" relationship "协作伙伴" references/ --core true
-python3 references/write_pipeline_v2.6.py search "读书" references/
-python3 references/write_pipeline_v2.6.py stats references/
-python3 references/write_pipeline_v2.6.py decay references/        # 梦境周期：统一衰减久不提的记忆
-python3 references/write_pipeline_v2.6.py forget "读书" references/
+python3 references/write_pipeline.py write "读书" preference "爱吃科幻小说" references/
+python3 references/write_pipeline.py write "伙伴" relationship "协作伙伴" references/ --core true
+python3 references/write_pipeline.py search "读书" references/
+python3 references/write_pipeline.py stats references/
+python3 references/write_pipeline.py decay references/        # 梦境周期：统一衰减久不提的记忆
+python3 references/write_pipeline.py forget "读书" references/
 ```
 
 命令集：`write` / `search` / `forget` / `stats` / `decay` / `vacuum` / `backup` / `recover` / `wellness` / `init`。
@@ -65,7 +61,7 @@ python3 references/write_pipeline_v2.6.py forget "读书" references/
 
 共 10 个：`preference`（偏好）、`event`（事件）、`habit`（习惯）、`rule`（规矩/红线）、`scene`（场景）、`relationship`（关系）、`emotion`（情绪）、`identity`（身份）、`milestone`（里程碑）、`general`（通用）。
 
-代码侧同一份集合出现在 `write_pipeline_v2.6.py` 的 `ALLOWED_KINDS` 与 `merge_migrate.py` 的 `ALLOWED_KINDS`，三处（本文档 + 两份代码）必须完全一致；不一致时写入会抛 `ValueError`，或产生文档漂移。
+代码侧同一份集合出现在 `write_pipeline.py` 的 `ALLOWED_KINDS` 与 `merge_migrate.py` 的 `ALLOWED_KINDS`，三处（本文档 + 两份代码）必须完全一致；不一致时写入会抛 `ValueError`，或产生文档漂移。
 
 ### 3.2 source 来源
 

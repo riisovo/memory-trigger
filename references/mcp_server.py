@@ -35,12 +35,12 @@ import os
 import sys
 import threading
 
-# ── 加载同目录的 write_pipeline_v2.6.py（文件名带点，必须用 importlib 按路径加载）──
+# ── 按路径用 importlib 加载同目录的 write_pipeline.py（不依赖 sys.path，显式指定文件）──
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_wp_path = os.path.join(_HERE, "write_pipeline_v2.6.py")
-_spec = importlib.util.spec_from_file_location("write_pipeline_v2_6", _wp_path)
+_wp_path = os.path.join(_HERE, "write_pipeline.py")
+_spec = importlib.util.spec_from_file_location("write_pipeline", _wp_path)
 wp = importlib.util.module_from_spec(_spec)
-sys.modules["write_pipeline_v2_6"] = wp
+sys.modules["write_pipeline"] = wp
 _spec.loader.exec_module(wp)
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402

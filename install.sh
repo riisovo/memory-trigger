@@ -18,7 +18,7 @@ echo "-- python: $("$PY" --version 2>&1)"
 
 # 2) 引擎冒烟 + 双源自检（验证随包代码没坏；全部用系统 python3，零依赖）
 echo "-- 引擎冒烟: stats"
-"$PY" "$REFS/write_pipeline_v2.6.py" stats "$REFS" >/dev/null
+"$PY" "$REFS/write_pipeline.py" stats "$REFS" >/dev/null
 echo "-- 双源自检: test_dual_source.py"
 "$PY" "$REFS/test_dual_source.py"
 

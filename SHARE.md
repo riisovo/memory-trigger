@@ -26,11 +26,11 @@ zip -r memory-trigger.zip memory-trigger/ -x "*/.git/*" "*/.backup/*" "*/.wal.js
 `install.sh` 会自动跑 `references/test_dual_source.py`，全 PASS 才算装好。手动验证：
 
 ```bash
-python3 references/write_pipeline_v2.6.py write "读书" preference "爱读科幻小说" references/
-python3 references/write_pipeline_v2.6.py search "读书" references/
-python3 references/write_pipeline_v2.6.py stats references/
+python3 references/write_pipeline.py write "读书" preference "爱读科幻小说" references/
+python3 references/write_pipeline.py search "读书" references/
+python3 references/write_pipeline.py stats references/
 ```
 
 ## 升级
 
-只换 `references/write_pipeline_v2.6.py` + `SKILL.md` 即可，记忆数据 `references/memory.json` 不受影响（建议先 `backup`）。
+只换 `references/write_pipeline.py` + `SKILL.md` 即可，记忆数据 `references/memory.json` 不受影响（建议先 `backup`）。

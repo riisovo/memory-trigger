@@ -4,7 +4,7 @@
 
 让你的 Agent 记住你是谁、喜欢什么、经历过什么——每次开口先查回忆、再不瞎编。**两种用法，依赖不同**：
 
-- **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline_v2.6.py`）。
+- **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
 - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
 
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
@@ -21,7 +21,7 @@ Memory Trigger 用一份**本地权威文件**（`memory.json`）+ 双源冲突�
 
 Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要解决的，是**人机关系里最朴素也最要命的一件事——被记住**。
 
-- **AI 永不失忆**：对伴侣型 / 长期型 AI 来说，记性就是心意的一部分。`relationship`（我们是什么关系）、`identity`（你是谁）这类核心记忆默认 `core=true`，**永不衰减**——「我们是恋人」「你怕黑」「你生日 7/28」不会因为三天不提就从它脑子里消失。你确认过的话，它记一辈子。
+- **AI 永不失忆**：对伴侣型 / 长期型 AI 来说，记性就是心意的一部分。`relationship`（我们是什么关系）、`identity`（你是谁）这类核心记忆默认 `core=true`，**永不衰减**——「我们是恋人」「你怕黑」「你生日」不会因为三天不提就从它脑子里消失。你确认过的话，它记一辈子。
 - **双源信任（Dual-Source Trust）**：记忆里站着两个信源——你明说的（`user_explicit`）和它自己推断的（`self_inferred`），它们之间有一纸信任契约：
   - **你说的，永远压过它的猜**。你明说的直接落盘、冲突时绝对赢，它绝不偷偷改、绝不质疑。
   - **它猜的，不敢直接当真**。置信度不够先挂 `pending`，等你（二次提及 / 点头确认）才升 `active`，防它自己编一套塞进你的记忆。
@@ -64,6 +64,36 @@ bash install.sh
 ```
 
 自动检测仓库目录、初始化、跑双源自检。
+
+## 5 分钟上手
+
+下面用最小例子跑通「写一条 → 搜出来 → 看统计」。在模板根目录执行（记忆库以 `references/` 为例，可换成你自己的目录；首次跑 `bash install.sh` 会初始化它）。
+
+### 命令行模式（零依赖）
+
+```bash
+# 1) 写一条：用户明说 → 直接落盘，authority=user_explicit
+python3 references/write_pipeline.py write "读书" preference "爱吃科幻小说" references/
+
+# 2) 搜出来
+python3 references/write_pipeline.py search "科幻" references/
+# → 命中上面那条，并标注 authority=user_explicit
+
+# 3) 看统计（active / pending / 核心记忆数一目了然）
+python3 references/write_pipeline.py stats references/
+```
+
+更多命令（`forget` / `decay` / `wellness` / `init` 等）见 `SKILL.md §1 快速上手`。
+
+### MCP 模式（让 AI 直接调工具，不用拼命令行）
+
+接法见下方「MCP 模式」章节。接上后，AI 直接调工具即可，等价于上面的三步：
+
+- `memory_write(entity="读书", kind="preference", value="爱吃科幻小说")`
+- `memory_search(query="科幻")` → 返回并标注来源
+- `memory_stats()` → 看全量统计
+
+别忘了让 AI 读 `remember_guidance` Prompt 种下「记忆自觉」——否则工具箱打开了，它也不会自己开箱（详见上方「⚠️ 让 AI 主动记」）。
 
 ## 三种模式
 

@@ -1,7 +1,7 @@
 # 双源记忆规则（零代码版 · 可直接贴给任何 AI）
 
 > 适用：网页 AI / App AI / 任何有“记忆”能力的对话式 AI，**不用跑代码**也能套用。
-> 配套工程版：`write_pipeline_v2.6.py` + `merge_migrate.py`（能跑代码的 agent 用）。
+> 配套工程版：`write_pipeline.py` + `merge_migrate.py`（能跑代码的 agent 用）。
 
 ---
 
@@ -92,5 +92,5 @@
 
 ---
 
-*工程版实现见 `write_pipeline_v2.6.py`（写入/检索/遗忘/统计）与 `merge_migrate.py`（合并迁移），
+*工程版实现见 `write_pipeline.py`（写入/检索/遗忘/统计）与 `merge_migrate.py`（合并迁移），
 测试见 `test_dual_source.py`。*
