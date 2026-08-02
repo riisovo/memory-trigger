@@ -18,7 +18,7 @@
 - 本机 Python 3.10+，能跑 `pip`（或 `uv`）
 - 拿到代码：把仓库 clone 下来，或下载 ZIP 解压，记住 `references/` 文件夹的**绝对路径**
 
-> 注：本 testkit 文件夹里平铺的 `mcp_server.py` / `verify_mcp_stdio.py` / `README` / `SKILL` 只是同源副本，供你速览核对。**真正部署请用完整仓库**——clone，或解压 `memory-trigger-v2.7-changed.zip`，解压后里面的 `references/` 才是 MCP server 与依赖所在。
+> 注：本 testkit 文件夹里平铺的 `mcp_server.py` / `verify_mcp_stdio.py` / `README` / `SKILL` 只是同源副本，供你速览核对。**真正部署请用完整仓库**——clone，或解压最新的 `memory-trigger-*.zip` 发布包，解压后里面的 `references/` 才是 MCP server 与依赖所在。
 
 ---
 

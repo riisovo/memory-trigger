@@ -9,6 +9,11 @@
 
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
 
+**v2.8** —— 拆耦合：graph 镜像独立为可选后端，核心文件默认**零 sqlite3 依赖**
+- 新增 `references/graph_backend.py`：把 graph 镜像逻辑（sqlite3 upsert）整个搬出核心，仅此模块 import sqlite3。
+- 核心 `write_pipeline.py` 顶部不再 `import sqlite3`；默认本地模式下连 `graph_backend` 都不会被加载——彻底做到「零依赖」名副其实，graph 同步成真·选配件（仅 `backend_config.json` 设 `mirror_mode=="graph"` 才动态加载）。
+- 外部 `cmd_*` 行为不变，回归测试全过（20/20 + 27/27）。
+
 ## 它解决什么
 
 - **记不住**：上下文一满，前面说的话全忘。

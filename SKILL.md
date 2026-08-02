@@ -8,7 +8,7 @@ version: 2.7
 
 给 agent 挂一份**本地权威**的长期记忆：用户说的直接写文件，agent 自己的印象只作补充、低置信先挂起，冲突时以文件为准。核心脚本 `references/write_pipeline.py`，迁移/校验用 `references/merge_migrate.py`，双源逻辑自检 `references/test_dual_source.py`。
 
-**零依赖**：脚本是纯标准库（fcntl/json/os），只要有 `python3` 就能跑，连 `pip install` 都不用。**各家 agent 把模板 clone 到自己的机器、跑脚本，记忆存在自己本地的 `memory.json`，物理隔离、不共享。**
+**零依赖**：核心脚本是纯标准库（fcntl/json/os），连 sqlite3 都不碰——graph 镜像已拆为可选后端 `references/graph_backend.py`，默认本地模式根本不会加载它（v2.8 拆耦合成果）。只要有 `python3` 就能跑，连 `pip install` 都不用。**各家 agent 把模板 clone 到自己的机器、跑脚本，记忆存在自己本地的 `memory.json`，物理隔离、不共享。**
 
 ## 0. 核心价值：为什么是「双源信任」而非普通记忆
 
