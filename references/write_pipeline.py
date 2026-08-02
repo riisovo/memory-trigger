@@ -63,7 +63,6 @@ import sys
 import time
 import shutil
 import uuid
-import sqlite3
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=8))  # UTC+8
@@ -371,10 +370,10 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
         safe_write_json(mem_path, memory)
 
-        # === PATCH mirror_to_graph ===
+        # === PATCH mirror_to_graph (v2.8 拆耦合: 默认零 sqlite3, 仅 graph 模式动态加载) ===
         final_entry = next((e for e in memory if e.get("id") == new_id), None)
         if final_entry:
-            _mirror_to_graph(final_entry, refs_dir)
+            _maybe_mirror_to_graph(final_entry, refs_dir)
 
         if entity not in ei["entities"]:
             ei["entities"][entity] = {
@@ -880,72 +879,35 @@ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
     print(json.dumps({"status": "ok", "date": today, "mood": mood}, ensure_ascii=False))
 
 
-def _to_utc_z(iso_local):
-    """把 trigger 的 +08:00 ISO 转 UTC Z 字符串，供 graph db 存储。无效则回退 now UTC。"""
-    if not iso_local:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        dt = ts_parse(iso_local)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except Exception:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _maybe_mirror_to_graph(entry, refs_dir):
+    """v2.8 拆耦合: graph 镜像逻辑已迁至 references/graph_backend.py（自包含, 仅该模块 import sqlite3）。
 
-
-def _mirror_to_graph(entry, refs_dir):
-    """PATCH: 把 trigger 写入的记忆镜像到 graph 的 memory.db（实现两套记忆打通）。
-       读 backend_config.json 的 mirror_mode=='graph' 才生效；否则跳过（零侵入）。
-       - memories 表：upsert（按 id），填满 NOT NULL 列，FTS rebuild 同步。
-       - core=true 或 CORE_KINDS：同步写 core_memory 表。
-       mirror 失败只告警、不阻断主写入（trigger 文件仍是权威源）。"""
+    本函数保证: 默认本地模式下**完全不接触 sqlite3 / graph_backend**——仅当
+    backend_config.json 设 mirror_mode=='graph' 且 graph_db_path 存在时, 才动态
+    加载 graph_backend 并调用其 mirror_to_graph()。这样核心文件顶部不再有 sqlite3
+    硬依赖, '零依赖' 名副其实, graph 成真·可选后端。"""
+    # 轻量预筛: 只读 config 判断, 不加载任何 sqlite 相关模块
     try:
-        cfg = safe_read_json(os.path.join(refs_dir, "backend_config.json")) or {}
+        cfg_path = os.path.join(refs_dir, "backend_config.json")
+        if not os.path.exists(cfg_path):
+            return
+        with open(cfg_path, "r", encoding="utf-8") as _f:
+            cfg = json.load(_f) or {}
         if cfg.get("mirror_mode") != "graph":
             return
         gdb = cfg.get("graph_db_path")
         if not gdb or not os.path.exists(gdb):
             return
-        mid = entry.get("id")
-        if not mid:
-            return
-        title = f'{entry.get("entity", "?")}:{entry.get("kind", "general")}'
-        content = entry.get("value", "")
-        tags = json.dumps(
-            [entry.get("entity", ""), entry.get("kind", ""), entry.get("source", "")],
-            ensure_ascii=False,
-        )
-        created = _to_utc_z(entry.get("created"))
-        updated = _to_utc_z(entry.get("updated") or entry.get("created"))
-        is_core = bool(entry.get("core")) or (entry.get("kind") in CORE_KINDS)
-        g = sqlite3.connect(gdb)
-        try:
-            cur = g.execute("SELECT rowid FROM memories WHERE id=?", (mid,)).fetchone()
-            if cur:
-                g.execute(
-                    """UPDATE memories SET title=?,content=?,tags=?,importance_score=?,confidence_score=?,updated_at=? WHERE id=?""",
-                    (title, content, tags, float(entry.get("importance", 1.0)),
-                     float(entry.get("confidence", 1.0)), updated, mid),
-                )
-            else:
-                g.execute(
-                    """INSERT INTO memories(id,scope,namespace,title,content,document_type,source,author,tags,access_level,language,version,created_at,updated_at,access_count,importance_score,confidence_score,condensation_level,provenance,stability,volatility,verification_tier)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (mid, 'user', None, title, content, 'memory', entry.get("source"), 'agent',
-                     tags, 'public', 'zh', 1, created, updated, 0,
-                     float(entry.get("importance", 1.0)), float(entry.get("confidence", 1.0)),
-                     'full', 'manual', 1.0, 'normal', 'source_verified'),
-                )
-            if is_core:
-                g.execute(
-                    """INSERT OR REPLACE INTO core_memory(scope,namespace,content,char_limit,updated_at) VALUES(?,?,?,?,?)""",
-                    ('user', None, content, 2000, updated),
-                )
-            # 外部内容 FTS 表需手动同步：rebuild 全表（数据量小，毫秒级）
-            g.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
-            g.commit()
-        finally:
-            g.close()
+    except Exception:
+        return
+    # 到此才动态加载 graph 后端（此时才 import sqlite3）
+    try:
+        import importlib.util as _ilu
+        _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "graph_backend.py")
+        _spec = _ilu.spec_from_file_location("graph_backend", _path)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _mod.mirror_to_graph(entry, refs_dir, cfg=cfg)
     except Exception as e:
         sys.stderr.write(f"[mirror_to_graph] skipped: {e}\n")
 

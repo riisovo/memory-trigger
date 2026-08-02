@@ -12,3 +12,7 @@ references/.lock
 references/.export/
 references/.DS_Store
 .DS_Store
+
+# Python 编译产物（v2.8.0 amend: 修复误提交的 __pycache__/*.pyc）
+__pycache__/
+*.pyc
