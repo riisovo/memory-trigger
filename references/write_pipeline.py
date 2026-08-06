@@ -122,6 +122,14 @@ def safe_write_json(path, data):
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.rename(tmp_path, path)
+    except PermissionError as e:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise PermissionError(
+            f"无写权限：无法写入 {path}。常见于记忆库目录由 root/其他用户创建、"
+            f"当前 MCP 进程无写权限，或 backend_config 开启 mirror_mode=graph 但其 sqlite 库不可写。"
+            f"原错误：{e}"
+        )
     except Exception:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -175,10 +183,15 @@ def file_unlock(fd, refs_dir):
 
 def wal_append(refs_dir, entry):
     path = os.path.join(refs_dir, ".wal.jsonl")
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except PermissionError as e:
+        raise PermissionError(
+            f"无写权限：无法追加 WAL {path}（记忆库目录 {refs_dir} 当前进程不可写）。原错误：{e}"
+        )
 
 def backup_files(refs_dir):
     bkp_dir = os.path.join(refs_dir, ".backup")

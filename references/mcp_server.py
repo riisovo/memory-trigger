@@ -34,6 +34,7 @@ import json
 import os
 import sys
 import threading
+from typing import Literal
 
 # ── 按路径用 importlib 加载同目录的 write_pipeline.py（不依赖 sys.path，显式指定文件）──
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +89,7 @@ def _call(fn, *args, **kwargs) -> dict:
 @mcp.tool()
 def memory_write(
     entity: str,
-    kind: str,
+    kind: Literal["preference", "event", "habit", "rule", "scene", "relationship", "emotion", "identity", "milestone", "general"],
     value: str,
     refs_dir: str = "",
     mode: str = "local",
@@ -97,19 +98,15 @@ def memory_write(
     confidence: float = 1.0,
     emotion_tags: str = "",
     reason: str = "",
-    core: str = "",
+    core: bool | None = None,
 ) -> str:
     """写入 / 更新一条记忆（双源信任的落盘入口）。
     entity: 实体名（用户 / 读书 / 伴侣…）；kind: 10 类之一（preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general）；
     value: 记忆内容。source=self_inferred 且 confidence<0.8 会自动挂 pending，不会污染权威源；
     用户明说用 source=user_explicit 直接落 active。core=true 可钉死核心记忆（relationship/identity 默认钉死，永不衰减）。"""
     refs = _resolve_refs(refs_dir)
-    core_arg = None
-    core_lower = (core or "").lower()
-    if core_lower in ("true", "1", "yes", "y"):
-        core_arg = True
-    elif core_lower in ("false", "0", "no", "n"):
-        core_arg = False
+    # core 已由 FastMCP 类型校验保证为 bool 或 None；防御性兜底
+    core_arg = bool(core) if core is not None else None
     et = [t.strip() for t in emotion_tags.split(",") if t.strip()] if emotion_tags else None
     res = _call(
         wp.cmd_write, entity, kind, value, refs,
