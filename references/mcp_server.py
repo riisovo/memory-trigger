@@ -52,13 +52,24 @@ mcp = FastMCP("memory-trigger")
 _print_lock = threading.Lock()
 
 
+# === v2.8.2 存量防线：每个记忆目录首次使用时自愈一次缺 entity 的旧记录（memoize，绝不阻断正常调用） ===
+_selfchecked: set = set()
+
+
 def _resolve_refs(refs_dir: str | None) -> str:
     if refs_dir:
-        return refs_dir
-    env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
-    if env:
-        return env
-    return _HERE
+        resolved = refs_dir
+    else:
+        env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
+        resolved = env if env else _HERE
+    # 首次触达该目录即自愈，后续调用跳过；任何异常都不影响工具本身
+    if resolved not in _selfchecked:
+        _selfchecked.add(resolved)
+        try:
+            wp.cmd_selfcheck(resolved)
+        except Exception as e:  # 自检失败只告警，不影响读写
+            sys.stderr.write(f"[memory_selfcheck] skipped (refs_dir={resolved}): {e}\n")
+    return resolved
 
 
 def _call(fn, *args, **kwargs) -> dict:
@@ -153,6 +164,12 @@ def memory_vacuum(refs_dir: str = "") -> str:
 def memory_backup(refs_dir: str = "") -> str:
     """备份 memory.json / entity_index.json 到 .backup/（保留最近 10 份）。"""
     return json.dumps(_call(wp.cmd_backup, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_selfcheck(refs_dir: str = "") -> str:
+    """自检并修复记忆库：扫描缺 entity 的旧记录（早期手写入库遗留），自动补全并打日志，返回修复摘要。"""
+    return json.dumps(_call(wp.cmd_selfcheck, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()

@@ -262,6 +262,9 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
               source="auto_detect", confidence=1.0, emotion_tags=None, reason=None,
               core=None):
     """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强）"""
+    # === v2.8.2 增量防线：entity 必填，杜绝新的缺 entity 记录（旧数据由 cmd_selfcheck 自愈） ===
+    if not entity or not str(entity).strip():
+        raise ValueError("entity 必填且不能为空：记忆必须归属到具体实体（如 用户/读书/伴侣）")
     # 校验 kind
     if etype not in ALLOWED_KINDS:
         raise ValueError(f"非法 kind='{etype}'，允许：{sorted(ALLOWED_KINDS)}")
@@ -519,9 +522,9 @@ def cmd_search(query, refs_dir):
     for r in results:
         r["authority"] = authority_of(r["entry"].get("source", "auto_detect"))
     # file 权威优先；同实体多源 → self 侧标 supplement
-    file_entities = {r["entry"]["entity"] for r in results if r["authority"] == "file"}
+    file_entities = {r["entry"].get("entity", "") for r in results if r["authority"] == "file"}
     for r in results:
-        r["supplement"] = (r["authority"] == "self" and r["entry"]["entity"] in file_entities)
+        r["supplement"] = (r["authority"] == "self" and r["entry"].get("entity", "") in file_entities)
     # === PATCH v2.7 C3 === 按"权威优先 + effective_importance 降序"排序（core 记忆恒靠前）
     now = datetime.now(TZ)
     for r in results:
@@ -547,6 +550,41 @@ def cmd_search(query, refs_dir):
         "results_count": len(results),
         "results": out
     }, ensure_ascii=False, indent=2))
+
+
+# === v2.8.2 存量防线：扫描并自愈缺 entity 的旧记录 ===
+def cmd_selfcheck(refs_dir):
+    """扫描 memory.json，修复 entity 缺失/为空的旧记录（早期手写入库、entity 尚未必填时留下）。
+    对缺 entity 的记录按 value 首行派生实体名自动补全（value 也为空则记为 '(未知实体)'），
+    写回并打印 WARNING 日志；已带 entity 的不动。返回修复摘要。"""
+    mem_path = os.path.join(refs_dir, "memory.json")
+    memory = safe_read_json(mem_path) or []
+    if not memory:
+        return {"checked": 0, "fixed": 0, "fixed_ids": []}
+
+    fixed = []
+    for entry in memory:
+        ent = entry.get("entity")
+        if not ent or not str(ent).strip():
+            val = (entry.get("value") or "").strip()
+            if val:
+                first_line = val.splitlines()[0].strip()
+                derived = (first_line[:40] + "...") if len(first_line) > 40 else first_line
+            else:
+                derived = "(未知实体)"
+            entry["entity"] = derived
+            kind = entry.get("kind") or entry.get("type")
+            fixed.append({"id": entry.get("id"), "kind": kind, "source": entry.get("source"), "entity": derived})
+            sys.stderr.write(
+                f"[memory_selfcheck] 修复缺 entity 记录 id={entry.get('id')} "
+                f"(kind={kind}, source={entry.get('source')}) -> entity='{derived}'\n"
+            )
+
+    if fixed:
+        backup_files(refs_dir)
+        safe_write_json(mem_path, memory)
+
+    return {"checked": len(memory), "fixed": len(fixed), "fixed_ids": fixed}
 
 
 def cmd_stats(refs_dir):
