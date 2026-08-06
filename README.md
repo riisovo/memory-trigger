@@ -14,6 +14,12 @@
 - 核心 `write_pipeline.py` 顶部不再 `import sqlite3`；默认本地模式下连 `graph_backend` 都不会被加载——彻底做到「零依赖」名副其实，graph 同步成真·选配件（仅 `backend_config.json` 设 `mirror_mode=="graph"` 才动态加载）。
 - 外部 `cmd_*` 行为不变，回归测试全过（20/20 + 27/27）。
 
+**v2.8.1** —— 修复 MCP 工具 schema 缺陷（用户存记忆连踩三坑）
+- `core` 参数：`mcp_server.py` 由 `str` 改为 `bool | None`。FastMCP 框架层即按布尔校验，调用方传 `true/false` 不再被「类型不符」拒绝；不传时仍按 `kind` 推导核心记忆（语义不变）。
+- `kind` 参数：由 `str` 改为 `Literal[10 类]`。FastMCP 在工具 schema 生成枚举，调用方传非法 `kind`（如 `reference`）在进函数前就被框架前置拦截，不再一轮轮试错。
+- 权限错误提示：`safe_write_json` / `wal_append` 捕获 `PermissionError`，改写为直白中文——点明记忆库目录是 root/他人建的、当前进程没写权限，或 `mirror_mode=graph` 的 sqlite 库不可写。不再只抛干巴巴的 `Errno 13`。
+- 实测：MCP schema 验证（kind 枚举 / core 布尔）+ 直接调用落盘 + 非法 kind 清晰报错 + 权限提示改写，9/9 通过；原有 `test_dual_source` 20/20 + 27/27 回归全过。
+
 ## 它解决什么
 
 - **记不住**：上下文一满，前面说的话全忘。
