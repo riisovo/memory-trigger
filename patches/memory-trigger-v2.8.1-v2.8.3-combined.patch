@@ -1,0 +1,1094 @@
+diff --git a/references/mcp_server.py b/references/mcp_server.py
+index 7d11606..70c24a4 100644
+--- a/references/mcp_server.py
++++ b/references/mcp_server.py
+@@ -52,13 +52,24 @@ mcp = FastMCP("memory-trigger")
+ _print_lock = threading.Lock()
+ 
+ 
++# === v2.8.2 存量防线：每个记忆目录首次使用时自愈一次缺 entity 的旧记录（memoize，绝不阻断正常调用） ===
++_selfchecked: set = set()
++
++
+ def _resolve_refs(refs_dir: str | None) -> str:
+     if refs_dir:
+-        return refs_dir
+-    env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
+-    if env:
+-        return env
+-    return _HERE
++        resolved = refs_dir
++    else:
++        env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
++        resolved = env if env else _HERE
++    # 首次触达该目录即自愈，后续调用跳过；任何异常都不影响工具本身
++    if resolved not in _selfchecked:
++        _selfchecked.add(resolved)
++        try:
++            wp.cmd_selfcheck(resolved)
++        except Exception as e:  # 自检失败只告警，不影响读写
++            sys.stderr.write(f"[memory_selfcheck] skipped (refs_dir={resolved}): {e}\n")
++    return resolved
+ 
+ 
+ def _call(fn, *args, **kwargs) -> dict:
+@@ -155,6 +166,12 @@ def memory_backup(refs_dir: str = "") -> str:
+     return json.dumps(_call(wp.cmd_backup, _resolve_refs(refs_dir)), ensure_ascii=False)
+ 
+ 
++@mcp.tool()
++def memory_selfcheck(refs_dir: str = "") -> str:
++    """自检并修复记忆库：扫描缺 entity 的旧记录（早期手写入库遗留），自动补全并打日志，返回修复摘要。"""
++    return json.dumps(_call(wp.cmd_selfcheck, _resolve_refs(refs_dir)), ensure_ascii=False)
++
++
+ @mcp.tool()
+ def memory_recover(refs_dir: str = "") -> str:
+     """从 WAL 恢复崩溃时未完成持久化的写入。崩溃后跑一次保平安。"""
+diff --git a/references/write_pipeline.py b/references/write_pipeline.py
+index d6ebfdb..5ed5484 100644
+--- a/references/write_pipeline.py
++++ b/references/write_pipeline.py
+@@ -58,6 +58,7 @@ try:
+ except ImportError:
+     fcntl = None  # 非 POSIX 平台（如 Windows）无 fcntl：降级为无文件锁，功能正常，仅失去跨进程并发保护
+ import json
++import math
+ import os
+ import sys
+ import time
+@@ -67,6 +68,10 @@ from datetime import datetime, timezone, timedelta
+ 
+ TZ = timezone(timedelta(hours=8))  # UTC+8
+ 
++# === PATCH v2.8.3 (加固) === 数值合法区间
++CONFIDENCE_MIN, CONFIDENCE_MAX = 0.0, 1.0
++SLEEP_HOURS_MIN, SLEEP_HOURS_MAX = 0.0, 24.0
++
+ # === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
+ ALLOWED_KINDS = {
+     "preference", "event", "habit", "rule", "scene",
+@@ -112,15 +117,121 @@ def safe_read_json(path):
+     try:
+         with open(path, "r", encoding="utf-8") as f:
+             return json.load(f)
+-    except (FileNotFoundError, json.JSONDecodeError):
++    except (FileNotFoundError, NotADirectoryError, IsADirectoryError, json.JSONDecodeError, UnicodeDecodeError):
++        return None
++
++# === PATCH v2.8.3 (加固) === 类型兜底：脏数据（None / 字符串 / 缺字段）不得让运算崩溃
++def _safe_str(v, default=""):
++    """任何值安全转字符串：None / 数字 / dict 都不炸。"""
++    if v is None:
++        return default
++    if isinstance(v, str):
++        return v
++    try:
++        return str(v)
++    except Exception:
++        return default
++
++def _safe_float(v, default=0.0, allow_nonfinite=False):
++    """任何值安全转有限浮点：None / 'abc' / NaN / Inf 一律退回 default。"""
++    if isinstance(v, bool):
++        return default
++    try:
++        f = float(v)
++    except (TypeError, ValueError):
++        return default
++    if not allow_nonfinite and not math.isfinite(f):
++        return default
++    return f
++
++def _require_finite(name, v, lo, hi):
++    """入口校验：必须是 [lo, hi] 区间内的有限数，否则明确拒绝（防 NaN/Inf 污染 JSON）。"""
++    if isinstance(v, bool):
++        raise ValueError(f"{name} 必须是数值，收到布尔值 {v!r}")
++    try:
++        f = float(v)
++    except (TypeError, ValueError):
++        raise ValueError(f"{name} 必须是数值，收到 {v!r}")
++    if not math.isfinite(f):
++        raise ValueError(
++            f"{name}={v!r} 非有限数（NaN/Infinity）。写入会让 JSON 出现裸 NaN 字面量，"
++            f"非 Python 客户端（JS/Go/Rust）将无法解析该记忆库，故拒绝。"
++        )
++    if not (lo <= f <= hi):
++        raise ValueError(f"{name}={f} 超出合法范围 [{lo}, {hi}]")
++    return f
++
++def _quarantine(path, why):
++    """把损坏文件另存为 .corrupt.<ts>，绝不原地丢弃——数据可人工找回。
++
++    === PATCH v2.8.3 === 时间戳精确到微秒 + 同名兜底加序号。
++    原来用秒级 ts，同一秒内连续损坏会 copy2 同名覆盖，只剩最后一份证据；
++    而"反复损坏"恰恰是坏客户端/坏磁盘的典型症状，前几份才是诊断关键。
++    """
++    if not os.path.exists(path):
++        return None
++    stamp = datetime.now(TZ).strftime("%Y-%m-%dT%H-%M-%S-%f")
++    dst = f"{path}.corrupt.{stamp}"
++    seq = 1
++    while os.path.exists(dst):
++        dst = f"{path}.corrupt.{stamp}.{seq}"
++        seq += 1
++    try:
++        shutil.copy2(path, dst)
++        sys.stderr.write(f"[memory] 检测到损坏文件 {os.path.basename(path)}（{why}），"
++                         f"已隔离副本 → {os.path.basename(dst)}\n")
++        return dst
++    except Exception as e:
++        sys.stderr.write(f"[memory] 隔离损坏文件失败 {path}: {e}\n")
+         return None
+ 
++def _restore_from_backup(refs_dir, stem):
++    """从 .backup 取最近一份快照恢复（stem: 'memory' / 'entity_index'）。找不到返回 None。"""
++    bkp_dir = os.path.join(refs_dir, ".backup")
++    if not os.path.isdir(bkp_dir):
++        return None
++    for path in _backup_candidates(bkp_dir, stem):
++        data = safe_read_json(path)
++        if data is not None:
++            sys.stderr.write(f"[memory] 已从备份 {os.path.basename(path)} 恢复 {stem}.json\n")
++            return data
++    return None
++
++def read_json_typed(path, expect, refs_dir=None, stem=None):
++    """读 JSON 并保证类型正确（expect=list|dict）。
++
++    这是 v2.8.3 的核心加固点：此前 `safe_read_json(...) or []` 会把
++    「文件损坏」和「文件不存在」混为一谈，导致损坏后写入直接用空列表覆盖，
++    **静默清空全部历史记忆**。现在的策略：
++      1. 文件不存在        → 返回空容器（正常冷启动）
++      2. 文件损坏/类型不符 → 先隔离 .corrupt 副本，再尝试从 .backup 恢复；
++                            恢复不到才以空容器继续（此时原始数据仍在 .corrupt 里）
++    """
++    empty = [] if expect is list else {}
++    if not os.path.exists(path):
++        return empty
++    data = safe_read_json(path)
++    why = None
++    if data is None:
++        why = "JSON 解析失败"
++    elif not isinstance(data, expect):
++        why = f"类型应为 {expect.__name__}，实际为 {type(data).__name__}"
++    if why is None:
++        return data
++    _quarantine(path, why)
++    if refs_dir and stem:
++        restored = _restore_from_backup(refs_dir, stem)
++        if isinstance(restored, expect):
++            return restored
++    return empty
++
+ def safe_write_json(path, data):
+     dirname = os.path.dirname(path)
+     tmp_path = path + ".tmp"
+     try:
+         with open(tmp_path, "w", encoding="utf-8") as f:
+-            json.dump(data, f, ensure_ascii=False, indent=2)
++            # allow_nan=False：最后一道防线，宁可写失败也不产出非法 JSON（裸 NaN/Infinity）
++            json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
+         os.rename(tmp_path, path)
+     except PermissionError as e:
+         if os.path.exists(tmp_path):
+@@ -154,10 +265,15 @@ def file_lock(refs_dir):
+             if time.time() > deadline:
+                 os.lseek(fd, 0, 0)
+                 raw = os.read(fd, 256).rstrip(b'\x00').rstrip(b' ')
++                # === PATCH v2.8.3 === locker_pid 先给默认值：此前 .lock 内容损坏时
++                # json.loads 抛错走 except pass，下面却仍引用 locker_data →
++                # UnboundLocalError 掩盖了真正的 TimeoutError，调用方无从判断是超时。
++                locker_pid = "unknown"
+                 try:
+                     locker_data = json.loads(raw)
+-                    locker_pid = locker_data.get("pid")
+-                    if locker_pid:
++                    if isinstance(locker_data, dict):
++                        locker_pid = locker_data.get("pid", "unknown")
++                    if isinstance(locker_pid, int):
+                         try:
+                             os.kill(locker_pid, 0)
+                         except OSError:
+@@ -166,10 +282,10 @@ def file_lock(refs_dir):
+                             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_TRUNC)
+                             deadline = time.time() + 30
+                             continue
+-                except (json.JSONDecodeError, KeyError):
+-                    pass
++                except (json.JSONDecodeError, ValueError, TypeError, KeyError):
++                    pass  # 锁文件内容损坏：无法判断持有者，按超时处理
+                 os.close(fd)
+-                raise TimeoutError(f"获取锁超时（30s），锁持有者 PID={locker_data.get('pid', 'unknown')}")
++                raise TimeoutError(f"获取锁超时（30s），锁持有者 PID={locker_pid}")
+             time.sleep(0.5)
+ 
+ def file_unlock(fd, refs_dir):
+@@ -193,33 +309,151 @@ def wal_append(refs_dir, entry):
+             f"无写权限：无法追加 WAL {path}（记忆库目录 {refs_dir} 当前进程不可写）。原错误：{e}"
+         )
+ 
++def _backup_candidates(bkp_dir, stem):
++    """该 stem 的备份快照路径列表，从新到旧。
++
++    === PATCH v2.8.3 === 按文件 mtime 排序而不是文件名：v2.8.3 起备份时间戳
++    改为微秒格式（旧格式带 '+08-00' 时区后缀），两种格式混在一起做字符串
++    排序会错判新旧（'+' < '-'），导致恢复时取到更旧的快照。mtime 不受
++    命名格式影响，且升级前后都成立。
++    """
++    try:
++        names = [f for f in os.listdir(bkp_dir)
++                 if f.startswith(stem + "_") and f.endswith(".json")]
++    except OSError:
++        return []
++    paths = [os.path.join(bkp_dir, n) for n in names]
++    def _key(p):
++        try:
++            return os.path.getmtime(p)
++        except OSError:
++            return 0.0
++    return sorted(paths, key=_key, reverse=True)
++
++def _latest_backup_path(bkp_dir, stem):
++    """取 .backup 里该 stem 最新一份快照的路径，没有则 None。"""
++    cands = _backup_candidates(bkp_dir, stem)
++    return cands[0] if cands else None
++
++_BACKUP_EXPECT = {"entity_index": dict, "memory": list}
++
+ def backup_files(refs_dir):
++    """快照 entity_index.json + memory.json 到 .backup。
++
++    === PATCH v2.8.3 (3.3a) === 四处改动，缺一不可：
++      1. **拒绝备份损坏文件**（最关键）：备份前先校验 JSON 可解析且类型正确。
++         此前会把已损坏的 memory.json 原样拍进 .backup，等于亲手毁掉最后的
++         救命快照——恢复时读到的全是坏数据，历史记忆真正永久丢失。
++      2. **时间戳带微秒**：原来是秒级，同一秒内的两次备份会 copy2 同名覆盖。
++         实测「写入→损坏→再写入」全发生在 1 秒内时，好快照被坏快照顶掉。
++      3. **内容去重**：与最新快照逐字节相同则整体跳过，避免 write-through 后
++         下一次写入前又拍一张一模一样的快照，把保留窗口（20 份）迅速冲掉。
++      4. **配对写入**：只要任一文件有变化，两个文件就用同一个 ts 一起备份。
++         回滚逻辑靠文件名里的 ts 配对取回两个文件，若只备份其中一个，会导致
++         回滚后 entity_index 与 memory 版本错位（索引指向不存在的记忆）。
++    """
+     bkp_dir = os.path.join(refs_dir, ".backup")
+     os.makedirs(bkp_dir, exist_ok=True)
+-    ts = ts_now().replace(":", "-")
++
++    targets = []
++    changed = False
+     for fname in ("entity_index.json", "memory.json"):
+         src = os.path.join(refs_dir, fname)
+-        if os.path.exists(src):
+-            dst = os.path.join(bkp_dir, f"{os.path.splitext(fname)[0]}_{ts}.json")
+-            shutil.copy2(src, dst)
+-    all_bkps = sorted(os.listdir(bkp_dir))
+-    while len(all_bkps) > 10 * 2:
+-        oldest = all_bkps[0]
+-        os.unlink(os.path.join(bkp_dir, oldest))
+-        all_bkps.pop(0)
++        if not os.path.exists(src):
++            continue
++        stem = os.path.splitext(fname)[0]
++        # 1. 损坏/类型不符的文件绝不进备份，保住上一份可用快照
++        data = safe_read_json(src)
++        if data is None or not isinstance(data, _BACKUP_EXPECT[stem]):
++            sys.stderr.write(f"[memory] {fname} 当前不可解析，已跳过备份以保住上一份可用快照\n")
++            continue
++        targets.append((src, stem))
++        prev = _latest_backup_path(bkp_dir, stem)
++        if prev is None:
++            changed = True
++            continue
++        try:
++            with open(src, "rb") as f1, open(prev, "rb") as f2:
++                if f1.read() != f2.read():
++                    changed = True
++        except OSError:
++            changed = True
++    if not targets or not changed:
++        return
++
++    # 2. 微秒级时间戳，杜绝同秒覆盖
++    ts = datetime.now(TZ).strftime("%Y-%m-%dT%H-%M-%S-%f")
++    for src, stem in targets:
++        shutil.copy2(src, os.path.join(bkp_dir, f"{stem}_{ts}.json"))
++
++    _prune_backups(bkp_dir, keep_groups=10)
++
++def _prune_backups(bkp_dir, keep_groups=10):
++    """按「快照组」淘汰旧备份，保留最近 keep_groups 组。
++
++    === PATCH v2.8.3 (4.5) === 原实现是 `sorted(os.listdir())` 后从头删到
++    只剩 20 个文件。文件名字母序里 `entity_index_*` 恒排在 `memory_*` 之前，
++    于是清理总是优先删光 entity_index 快照——实测跑成 memory 16 份、
++    entity_index 仅 4 份，能配对的只有 4 组。一旦触发回滚，找不到同 ts 的
++    entity_index，就只回滚了 memory，索引与记忆版本错位。
++    现在改为按同一 ts 归组、整组淘汰，保证任何时刻两类快照都成对存在。
++    """
++    groups = {}
++    try:
++        names = os.listdir(bkp_dir)
++    except OSError:
++        return
++    for name in names:
++        if not name.endswith(".json"):
++            continue
++        base = name[:-len(".json")]
++        for stem in _BACKUP_EXPECT:
++            if base.startswith(stem + "_"):
++                groups.setdefault(base[len(stem) + 1:], []).append(name)
++                break
++    if len(groups) <= keep_groups:
++        return
++    # 组的新旧以组内最新 mtime 为准（兼容 v2.8.3 之前的旧命名格式）
++    def _group_mtime(files):
++        best = 0.0
++        for f in files:
++            try:
++                best = max(best, os.path.getmtime(os.path.join(bkp_dir, f)))
++            except OSError:
++                pass
++        return best
++    ordered = sorted(groups.items(), key=lambda kv: _group_mtime(kv[1]), reverse=True)
++    for _, files in ordered[keep_groups:]:
++        for f in files:
++            try:
++                os.unlink(os.path.join(bkp_dir, f))
++            except OSError:
++                pass
+ 
+ # === PATCH v2.3 === 实体归一化
+-def normalize_entity(entity, refs_dir):
++def normalize_entity(entity, refs_dir, substring_match=False):
++    """把实体名映射到标准名。
++
++    === PATCH v2.8.3 === `substring_match` 默认关闭。
++    此前只要已有实体名是新实体名的子串就强行归并（len>=2 且 std in entity），
++    于是「读书笔记软件选型」被吞成「读书」、「运动损伤康复」被吞成「运动」——
++    两件完全不同的事被压成一条，语义永久丢失且不可逆；search 的查询词同样被改写，
++    导致精确查询召回一堆无关结果。现在只认 aliases.json / DEFAULT_ALIASES 里
++    **显式配置**的精确映射，绝不再做启发式子串归并。
++    """
++    if not isinstance(entity, str):
++        return entity
+     alias_path = os.path.join(refs_dir, "aliases.json")
+-    aliases = safe_read_json(alias_path) or {}
++    aliases = read_json_typed(alias_path, dict)
+     if entity in aliases:
+         return aliases[entity]
+     if entity in DEFAULT_ALIASES:
+         return DEFAULT_ALIASES[entity]
+-    ei = safe_read_json(os.path.join(refs_dir, "entity_index.json")) or {"entities": {}}
+-    for std in ei.get("entities", {}).keys():
+-        if len(std) >= 2 and std != entity and std in entity:
+-            return std
++    if substring_match:
++        ei = read_json_typed(os.path.join(refs_dir, "entity_index.json"), dict)
++        for std in ei.get("entities", {}).keys():
++            if len(std) >= 2 and std != entity and std in entity:
++                return std
+     return entity
+ 
+ # === PATCH v2.6 B1 === 源 → 权威层
+@@ -233,14 +467,18 @@ def authority_of(source):
+ # === PATCH v2.7 (人情味层) === 遗忘曲线 / 核心记忆工具
+ def _is_core(entry):
+     """是否核心记忆：显式 core 字段优先；缺省时按 kind 推导（relationship/identity）。"""
++    if not isinstance(entry, dict):
++        return False
+     if "core" in entry:
+         return bool(entry.get("core"))
+     return entry.get("kind") in CORE_KINDS
+ 
+ def _days_since(entry, now):
+     """距离最近一次召回（或创建）的天数，用于遗忘衰减。"""
++    if not isinstance(entry, dict):
++        return 0.0
+     ref = entry.get("last_recalled") or entry.get("created")
+-    if not ref:
++    if not ref or not isinstance(ref, str):
+         return 0.0
+     try:
+         return max(0.0, (now - ts_parse(ref)).total_seconds() / 86400.0)
+@@ -248,10 +486,15 @@ def _days_since(entry, now):
+         return 0.0
+ 
+ def effective_importance(entry, now):
+-    """当前有效权重：core 记忆恒为 1.0；其余按衰减公式计算。"""
++    """当前有效权重：core 记忆恒为 1.0；其余按衰减公式计算。
++
++    === PATCH v2.8.3 === importance 走 _safe_float 兜底。旧库/手工编辑可能留下
++    importance=null 或 "高" 这类脏值，此前直接参与乘法会抛 TypeError 让整个
++    decay/search/stats 崩掉——一条脏记录毒死整个记忆库。
++    """
+     if _is_core(entry):
+         return 1.0
+-    imp = entry.get("importance", 1.0)
++    imp = _safe_float(entry.get("importance", 1.0), 1.0)
+     return imp * (DECAY_FACTOR ** _days_since(entry, now))
+ 
+ # ──────────────────────────────────────────
+@@ -262,9 +505,18 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+               source="auto_detect", confidence=1.0, emotion_tags=None, reason=None,
+               core=None):
+     """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强）"""
++    # === v2.8.2 增量防线：entity 必填，杜绝新的缺 entity 记录（旧数据由 cmd_selfcheck 自愈） ===
++    if not entity or not str(entity).strip():
++        raise ValueError("entity 必填且不能为空：记忆必须归属到具体实体（如 用户/读书/伴侣）")
++    entity = str(entity)
+     # 校验 kind
+     if etype not in ALLOWED_KINDS:
+         raise ValueError(f"非法 kind='{etype}'，允许：{sorted(ALLOWED_KINDS)}")
++    # === PATCH v2.8.3 === confidence 必须是 [0,1] 有限数：
++    # NaN/Inf 会让 json.dump 产出裸 NaN 字面量（Python 能读、JS/Go 读不了）→ 记忆库变砖；
++    # 越界值会让 pending 阈值判断失真，故一并明确拒绝而非静默接受。
++    confidence = _require_finite("confidence", confidence, CONFIDENCE_MIN, CONFIDENCE_MAX)
++    value = _safe_str(value)
+ 
+     backend_path = os.path.join(refs_dir, "backend_config.json")
+     config_mode = None
+@@ -293,34 +545,24 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+ 
+         new_id = f"mem_{datetime.now(TZ).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+ 
+-        wal_append(refs_dir, {
+-            "ts": ts_now(),
+-            "op": "upsert",
+-            "entity": entity,
+-            "value": value,
+-            "type": etype,
+-            "kind": kind,
+-            "sentiment": sentiment,
+-            "source": source,
+-            "confidence": confidence,
+-            "emotion_tags": emotion_tags or [],
+-            "memory_id": new_id,
+-            "targets": targets
+-        })
+-
+         mem_path = os.path.join(refs_dir, "memory.json")
+         ei_path = os.path.join(refs_dir, "entity_index.json")
+-        memory = safe_read_json(mem_path) or []
+-        ei = safe_read_json(ei_path) or {"version": 1, "entities": {}}
++        # === PATCH v2.8.3 === 损坏时自动隔离 + 从 .backup 恢复，绝不用空列表覆盖历史
++        memory = read_json_typed(mem_path, list, refs_dir, "memory")
++        ei = read_json_typed(ei_path, dict, refs_dir, "entity_index")
++        if "entities" not in ei or not isinstance(ei.get("entities"), dict):
++            ei = {"version": 1, "entities": {}}
+ 
+         existing_idx = None
+         similar_idx = None
+ 
+         for i, entry in enumerate(memory):
++            if not isinstance(entry, dict):
++                continue  # 脏数据（字符串/数字混入）跳过，不让它毒死整条写入链
+             e_kind = entry.get("kind") or entry.get("type")
+             if entry.get("entity") == entity and e_kind == kind:
+                 if entry.get("status") == "active":
+-                    old_val = entry.get("value", "")
++                    old_val = _safe_str(entry.get("value", ""))
+                     if len(old_val) > 0 and old_val == value:
+                         similar_idx = i
+                         break
+@@ -362,9 +604,33 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+                 "core": (kind in CORE_KINDS) if core is None else bool(core),
+             }
+ 
++        # === PATCH v2.8.3 (P0-1) === 幂等合并会复用旧记录的 id，因此**先定稿 memory_id
++        # 再写 WAL**。此前 WAL 在函数开头就用新生成的 id 写了 upsert，而合并分支随后把
++        # new_id 换成旧记录 id，commit 写的是旧 id → WAL 里永远躺着一条 (entity, 新id)
++        # 的孤儿 upsert。cmd_recover 认为它未提交就重放，重放又追加一对 upsert+commit，
++        # 于是每 recover 一次 WAL 就翻倍（实测 6→10→18→34），永远收敛不了。
++        if similar_idx is not None:
++            new_id = memory[similar_idx].get("id") or new_id
++
++        wal_append(refs_dir, {
++            "ts": ts_now(),
++            "op": "upsert",
++            "entity": entity,
++            "value": value,
++            "type": etype,
++            "kind": kind,
++            "sentiment": sentiment,
++            "source": source,
++            "confidence": confidence,
++            "emotion_tags": emotion_tags or [],
++            "memory_id": new_id,
++            "targets": targets
++        })
++
+         if similar_idx is not None:
+             memory[similar_idx]["value"] = value
+             memory[similar_idx]["updated"] = ts_now()
++            memory[similar_idx]["id"] = new_id
+             if sentiment is not None:
+                 memory[similar_idx]["sentiment"] = sentiment
+             if emotion_tags is not None:
+@@ -373,7 +639,6 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+             memory[similar_idx]["confidence"] = confidence
+             if core is not None:
+                 memory[similar_idx]["core"] = bool(core)
+-            new_id = memory[similar_idx]["id"]
+         elif existing_idx is not None:
+             # 内容不同（如偏好翻转）→ 旧 active 标 superseded，新建
+             memory[existing_idx]["status"] = "superseded"
+@@ -439,6 +704,21 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+             "memory_id": new_id
+         })
+ 
++        # === PATCH v2.8.3 (3.3a) === write-through 备份：提交成功后立刻再拍一张快照。
++        # 此前只在写入「之前」备份，快照永远滞后一次写入——一旦 memory.json 损坏，
++        # 从备份恢复必然丢掉最后成功写入的那条记忆（实测 2 条→只回来 1 条）。
++        # 放在 commit 之后，保证 .backup 最新快照 == 最后一次确认落盘的状态。
++        # 注意：不能提前到 commit 之前，否则会破坏上面「回滚到最新备份」的语义。
++        try:
++            backup_files(refs_dir)
++        except Exception as e:
++            sys.stderr.write(f"[memory] write-through 备份失败（不影响本次写入）：{e}\n")
++
++        # === PATCH v2.8.3 (3.4b) === 重新写入某实体 = 用户又要记它了，
++        # 必须把它从"已遗忘清单"里摘掉。否则会出现自相矛盾的状态：
++        # search 能召回这条记忆，suppressed_prompt.md 却仍在命令 AI「不要主动提及」。
++        _unsuppress_entity(refs_dir, entity)
++
+         print(json.dumps({
+             "status": "committed",
+             "memory_id": new_id,
+@@ -457,43 +737,71 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
+         file_unlock(fd, refs_dir)
+ 
+ 
+-def _touch_recalled(mem_path, hit_ids, now=None):
++def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
+     """=== PATCH v2.6 A1 + v2.7 C2 === 检索命中后戳 last_recalled，并对非 core 记忆
+-       应用遗忘衰减 importance *= DECAY_FACTOR ** days_since_last_recalled。"""
++       应用遗忘衰减 importance *= DECAY_FACTOR ** days_since_last_recalled。
++
++    === PATCH v2.8.3 (P0-3) === 整个 read-modify-write 必须在文件锁内完成。
++    此前 search 在锁外读盘、改内存、再整体写回，与并发的 write 相互覆盖：
++    write 刚落盘的新记录会被 search 手里的旧快照抹掉。实测 3 写 + 3 搜并发，
++    期望 29 条只剩 16 条，**丢失 45%**。加锁后读到的一定是最新快照。
++    """
+     if not hit_ids:
+         return
+     now = now or datetime.now(TZ)
+-    memory = safe_read_json(mem_path) or []
+-    changed = False
+-    for e in memory:
+-        if e.get("id") in hit_ids and e.get("status") == "active":
+-            if not _is_core(e):
+-                days = _days_since(e, now)
+-                cur = e.get("importance", 1.0)
+-                e["importance"] = round(cur * (DECAY_FACTOR ** days), 6)
+-            e["last_recalled"] = now.isoformat(timespec="seconds")
+-            changed = True
+-    if changed:
+-        safe_write_json(mem_path, memory)
++    hit = set(hit_ids)
++    fd = file_lock(refs_dir)
++    try:
++        memory = read_json_typed(mem_path, list, refs_dir, "memory")
++        changed = False
++        for e in memory:
++            if not isinstance(e, dict):
++                continue
++            if e.get("id") in hit and e.get("status") == "active":
++                if not _is_core(e):
++                    days = _days_since(e, now)
++                    cur = _safe_float(e.get("importance", 1.0), 1.0)
++                    e["importance"] = round(cur * (DECAY_FACTOR ** days), 6)
++                e["last_recalled"] = now.isoformat(timespec="seconds")
++                changed = True
++        if changed:
++            safe_write_json(mem_path, memory)
++    finally:
++        file_unlock(fd, refs_dir)
+ 
+ 
+ def cmd_search(query, refs_dir):
+     """本地检索；PATCH v2.6: 仅返回 active，标注 authority + supplement"""
++    # === PATCH v2.8.3 (3.5b) === 查询词不再被子串归一化改写（见 normalize_entity 注释）
++    query = _safe_str(query)
+     query = normalize_entity(query, refs_dir)
+ 
+     mem_path = os.path.join(refs_dir, "memory.json")
+     ei_path = os.path.join(refs_dir, "entity_index.json")
+ 
+-    memory = safe_read_json(mem_path) or []
+-    ei = safe_read_json(ei_path) or {"version": 1, "entities": {}}
++    memory = read_json_typed(mem_path, list, refs_dir, "memory")
++    ei = read_json_typed(ei_path, dict, refs_dir, "entity_index")
++    if not isinstance(ei.get("entities"), dict):
++        ei = {"version": 1, "entities": {}}
+ 
+     results = []
+ 
++    # === PATCH v2.8.3 (3.5c) === 空/纯空白查询直接返回空。
++    # 此前 "" in val.lower() 恒为 True，一个空 query 就把整库（含 identity 等隐私记忆）
++    # 全量倒出，等同于无差别信息泄露。
++    if not query.strip():
++        print(json.dumps({"query": query, "results_count": 0, "results": []}, ensure_ascii=False, indent=2))
++        return
++
++    q = query.lower()
++
+     if query in ei.get("entities", {}):
+-        ent = ei["entities"][query]
+-        mid = ent.get("last_memory_id")
++        ent = ei["entities"].get(query) or {}
++        mid = ent.get("last_memory_id") if isinstance(ent, dict) else None
+         if mid:
+             for entry in memory:
++                if not isinstance(entry, dict):
++                    continue
+                 # === PATCH v2.6 B1 === 只回 active；pending/superseded 不进检索（防幻觉固化/已遗忘漏网）
+                 if entry.get("id") == mid and entry.get("entity") == query and entry.get("status") == "active":
+                     results.append({
+@@ -504,11 +812,18 @@ def cmd_search(query, refs_dir):
+                     break
+ 
+     for entry in memory:
++        # === PATCH v2.8.3 (P1) === 全部字段走 .get + _safe_str：
++        # 旧库里缺 entity / 缺 id / value=null 的记录此前会让 search 直接
++        # KeyError / AttributeError 崩掉，一条脏记录就让整个检索不可用。
++        if not isinstance(entry, dict):
++            continue
+         if entry.get("status") != "active":
+             continue
+-        val = entry.get("value", "")
+-        if query.lower() in val.lower() or query.lower() in entry.get("entity", "").lower():
+-            if not any(r["entry"].get("id") == entry["id"] for r in results):
++        val = _safe_str(entry.get("value", "")).lower()
++        ent_name = _safe_str(entry.get("entity", "")).lower()
++        if q in val or q in ent_name:
++            eid = entry.get("id")
++            if eid is None or not any(r["entry"].get("id") == eid for r in results):
+                 results.append({
+                     "source": "keyword",
+                     "confidence": 0.75,
+@@ -519,9 +834,9 @@ def cmd_search(query, refs_dir):
+     for r in results:
+         r["authority"] = authority_of(r["entry"].get("source", "auto_detect"))
+     # file 权威优先；同实体多源 → self 侧标 supplement
+-    file_entities = {r["entry"]["entity"] for r in results if r["authority"] == "file"}
++    file_entities = {_safe_str(r["entry"].get("entity", "")) for r in results if r["authority"] == "file"}
+     for r in results:
+-        r["supplement"] = (r["authority"] == "self" and r["entry"]["entity"] in file_entities)
++        r["supplement"] = (r["authority"] == "self" and _safe_str(r["entry"].get("entity", "")) in file_entities)
+     # === PATCH v2.7 C3 === 按"权威优先 + effective_importance 降序"排序（core 记忆恒靠前）
+     now = datetime.now(TZ)
+     for r in results:
+@@ -529,8 +844,8 @@ def cmd_search(query, refs_dir):
+     results.sort(key=lambda r: (0 if r["authority"] == "file" else 1, -r["_eff_imp"]))
+ 
+     # === PATCH v2.6 A1 + v2.7 C2 === 命中即戳 last_recalled + 衰减
+-    hit_ids = [r["entry"]["id"] for r in results]
+-    _touch_recalled(mem_path, hit_ids, now)
++    hit_ids = [r["entry"].get("id") for r in results if r["entry"].get("id")]
++    _touch_recalled(refs_dir, mem_path, hit_ids, now)
+ 
+     out = []
+     for r in results[:5]:
+@@ -549,14 +864,53 @@ def cmd_search(query, refs_dir):
+     }, ensure_ascii=False, indent=2))
+ 
+ 
++# === v2.8.2 存量防线：扫描并自愈缺 entity 的旧记录 ===
++def cmd_selfcheck(refs_dir):
++    """扫描 memory.json，修复 entity 缺失/为空的旧记录（早期手写入库、entity 尚未必填时留下）。
++    对缺 entity 的记录按 value 首行派生实体名自动补全（value 也为空则记为 '(未知实体)'），
++    写回并打印 WARNING 日志；已带 entity 的不动。返回修复摘要。"""
++    mem_path = os.path.join(refs_dir, "memory.json")
++    # 注意：这里刻意不传 refs_dir/stem —— selfcheck 是只读体检，不应触发备份回滚副作用
++    memory = read_json_typed(mem_path, list)
++    if not memory:
++        return {"checked": 0, "fixed": 0, "fixed_ids": []}
++
++    fixed = []
++    for entry in memory:
++        if not isinstance(entry, dict):
++            continue
++        ent = entry.get("entity")
++        if not ent or not str(ent).strip():
++            val = _safe_str(entry.get("value") or "").strip()
++            if val:
++                first_line = val.splitlines()[0].strip()
++                derived = (first_line[:40] + "...") if len(first_line) > 40 else first_line
++            else:
++                derived = "(未知实体)"
++            entry["entity"] = derived
++            kind = entry.get("kind") or entry.get("type")
++            fixed.append({"id": entry.get("id"), "kind": kind, "source": entry.get("source"), "entity": derived})
++            sys.stderr.write(
++                f"[memory_selfcheck] 修复缺 entity 记录 id={entry.get('id')} "
++                f"(kind={kind}, source={entry.get('source')}) -> entity='{derived}'\n"
++            )
++
++    if fixed:
++        backup_files(refs_dir)
++        safe_write_json(mem_path, memory)
++
++    return {"checked": len(memory), "fixed": len(fixed), "fixed_ids": fixed}
++
++
+ def cmd_stats(refs_dir):
+     mem_path = os.path.join(refs_dir, "memory.json")
+     ei_path = os.path.join(refs_dir, "entity_index.json")
+ 
+-    memory = safe_read_json(mem_path) or []
+-    ei = safe_read_json(ei_path) or {"version": 1, "entities": {}}
++    memory = [m for m in read_json_typed(mem_path, list, refs_dir, "memory") if isinstance(m, dict)]
++    ei = read_json_typed(ei_path, dict, refs_dir, "entity_index")
+ 
+-    entities = ei.get("entities", {})
++    entities = ei.get("entities") if isinstance(ei.get("entities"), dict) else {}
++    entities = {k: v for k, v in entities.items() if isinstance(v, dict)}
+     confirmed = sum(1 for e in entities.values() if e.get("status") == "confirmed")
+     pending = sum(1 for e in entities.values() if e.get("status") == "pending")
+     superseded = sum(1 for m in memory if m.get("status") == "superseded")
+@@ -578,8 +932,7 @@ def cmd_stats(refs_dir):
+         key=lambda x: x[2]
+     )[:5]
+ 
+-    timestamps = [m.get("created", "") for m in memory if m.get("created")]
+-    timestamps.sort()
++    timestamps = sorted(_safe_str(m.get("created", "")) for m in memory if m.get("created"))
+ 
+     # === PATCH v2.6 A3 === 最久未召回排行（last_recalled 为空退回 created）
+     now = datetime.now(TZ)
+@@ -618,23 +971,31 @@ def cmd_decay(refs_dir):
+     """=== PATCH v2.7 C2 === 梦境周期：对全部 active 非 core 记忆统一应用遗忘衰减。
+        可定期跑（如每周巡检），让久不提的记忆慢慢淡化，重要的被反复唤起而保持。"""
+     mem_path = os.path.join(refs_dir, "memory.json")
+-    memory = safe_read_json(mem_path) or []
+-    now = datetime.now(TZ)
+-    decayed = 0
+-    for e in memory:
+-        if e.get("status") != "active" or _is_core(e):
+-            continue
+-        days = _days_since(e, now)
+-        cur = e.get("importance", 1.0)
+-        new = round(cur * (DECAY_FACTOR ** days), 6)
+-        if new != cur:
+-            e["importance"] = new
+-            decayed += 1
+-    safe_write_json(mem_path, memory)
++    fd = file_lock(refs_dir)
++    try:
++        memory = read_json_typed(mem_path, list, refs_dir, "memory")
++        now = datetime.now(TZ)
++        decayed = 0
++        for e in memory:
++            if not isinstance(e, dict):
++                continue
++            if e.get("status") != "active" or _is_core(e):
++                continue
++            days = _days_since(e, now)
++            # === PATCH v2.8.3 === importance 脏值（null / "高"）不再让整库 decay 崩溃
++            cur = _safe_float(e.get("importance", 1.0), 1.0)
++            new = round(cur * (DECAY_FACTOR ** days), 6)
++            if new != cur:
++                e["importance"] = new
++                decayed += 1
++        safe_write_json(mem_path, memory)
++    finally:
++        file_unlock(fd, refs_dir)
+     print(json.dumps({
+         "status": "decayed",
+         "decayed_count": decayed,
+-        "active_noncore": sum(1 for m in memory if m.get("status") == "active" and not _is_core(m)),
++        "active_noncore": sum(1 for m in memory
++                              if isinstance(m, dict) and m.get("status") == "active" and not _is_core(m)),
+     }, ensure_ascii=False))
+ 
+ 
+@@ -643,25 +1004,47 @@ def cmd_vacuum(refs_dir):
+     archive_dir = os.path.join(refs_dir, ".archive")
+     os.makedirs(archive_dir, exist_ok=True)
+ 
+-    memory = safe_read_json(mem_path) or []
+-    now = datetime.now(TZ)
+-    cutoff_90d = now - timedelta(days=90)
+-
+-    to_archive = []
+-    retained = []
+-    for entry in memory:
+-        if entry.get("status") == "superseded":
+-            created = ts_parse(entry["created"])
+-            if created < cutoff_90d:
+-                to_archive.append(entry)
++    fd = file_lock(refs_dir)
++    try:
++        memory = read_json_typed(mem_path, list, refs_dir, "memory")
++        now = datetime.now(TZ)
++        cutoff_90d = now - timedelta(days=90)
++
++        to_archive = []
++        retained = []
++        for entry in memory:
++            if not isinstance(entry, dict):
++                retained.append(entry)
+                 continue
+-        retained.append(entry)
+-
+-    if to_archive:
+-        date_str = now.strftime("%Y%m%d")
+-        archive_path = os.path.join(archive_dir, f"memory_{date_str}.json")
+-        safe_write_json(archive_path, to_archive)
+-        safe_write_json(mem_path, retained)
++            if entry.get("status") == "superseded":
++                # === PATCH v2.8.3 (P1) === created 缺失或格式非法不再抛
++                # KeyError/ValueError 让整个 vacuum 崩掉；无法判断年龄的记录一律
++                # 保守保留（宁可不清理，也绝不误删或中断维护流程）。
++                raw_created = entry.get("created")
++                created = None
++                if isinstance(raw_created, str):
++                    try:
++                        created = ts_parse(raw_created)
++                    except (ValueError, TypeError):
++                        created = None
++                if created is not None and created < cutoff_90d:
++                    to_archive.append(entry)
++                    continue
++            retained.append(entry)
++
++        if to_archive:
++            # === PATCH v2.8.3 (P0-6) === 同日多次 vacuum 必须**合并**而不是覆盖。
++            # 此前归档名只到日期（memory_YYYYMMDD.json），当天第二次 vacuum 直接
++            # 覆写，上一批归档数据永久丢失。现在先读回已有归档再追加。
++            date_str = now.strftime("%Y%m%d")
++            archive_path = os.path.join(archive_dir, f"memory_{date_str}.json")
++            existing = read_json_typed(archive_path, list)
++            existing_ids = {e.get("id") for e in existing if isinstance(e, dict)}
++            merged = list(existing) + [e for e in to_archive if e.get("id") not in existing_ids]
++            safe_write_json(archive_path, merged)
++            safe_write_json(mem_path, retained)
++    finally:
++        file_unlock(fd, refs_dir)
+ 
+     print(json.dumps({
+         "status": "done",
+@@ -681,10 +1064,12 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
+     fd = file_lock(refs_dir)
+     try:
+         mem_path = os.path.join(refs_dir, "memory.json")
+-        memory = safe_read_json(mem_path) or []
++        memory = read_json_typed(mem_path, list, refs_dir, "memory")
+ 
+         forgotten = []
+         for e in memory:
++            if not isinstance(e, dict):
++                continue
+             if e.get("status") != "active":
+                 continue
+             match = (e.get("id") == entity_or_id) or (e.get("entity") == entity_or_id)
+@@ -706,9 +1091,19 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
+         safe_write_json(mem_path, memory)
+ 
+         # 写 .suppressed.json
++        # === PATCH v2.8.3 (3.4d) === 按 (entity, kind) 去重。此前每次 forget 都无脑
++        # append，反复遗忘同一实体会让 suppressed_prompt.md 里堆出成排重复的
++        # 「不要主动提及 X」，白白挤占 AI 的系统提示词预算。
+         supp_path = os.path.join(refs_dir, ".suppressed.json")
+-        supp = safe_read_json(supp_path) or {"suppressed": []}
++        supp = read_json_typed(supp_path, dict)
++        if not isinstance(supp.get("suppressed"), list):
++            supp = {"suppressed": []}
++        seen = {(s.get("entity"), s.get("kind")) for s in supp["suppressed"] if isinstance(s, dict)}
+         for e in forgotten:
++            key = (e.get("entity"), e.get("kind") or e.get("type"))
++            if key in seen:
++                continue
++            seen.add(key)
+             supp["suppressed"].append({
+                 "entity": e.get("entity"),
+                 "memory_id": e.get("id"),
+@@ -731,6 +1126,31 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
+         file_unlock(fd, refs_dir)
+ 
+ 
++def _unsuppress_entity(refs_dir, entity):
++    """=== PATCH v2.8.3 (3.4b) === 把某实体从"已遗忘清单"里摘掉并重生成 prompt。
++
++    用户重新写入一条记忆，就意味着这件事又该被记住了。若不同步清理 suppressed，
++    记忆库会进入自相矛盾的状态：memory_search 能召回它，suppressed_prompt.md
++    却仍在指示 AI「不要主动提及」——AI 于是"知道却装作不知道"。
++    """
++    supp_path = os.path.join(refs_dir, ".suppressed.json")
++    if not os.path.exists(supp_path):
++        return
++    try:
++        supp = read_json_typed(supp_path, dict)
++        items = supp.get("suppressed")
++        if not isinstance(items, list):
++            return
++        kept = [s for s in items if not (isinstance(s, dict) and s.get("entity") == entity)]
++        if len(kept) == len(items):
++            return
++        supp["suppressed"] = kept
++        safe_write_json(supp_path, supp)
++        _regen_suppressed_prompt(refs_dir, supp)
++    except Exception as e:  # 清理失败绝不影响写入主流程
++        sys.stderr.write(f"[memory] unsuppress '{entity}' skipped: {e}\n")
++
++
+ def _regen_suppressed_prompt(refs_dir, supp):
+     """根据 .suppressed.json 重新生成 suppressed_prompt.md"""
+     lines = ["# 已遗忘清单（双向遗忘）",
+@@ -738,6 +1158,8 @@ def _regen_suppressed_prompt(refs_dir, supp):
+              "以下记忆已从文件标 superseded，且你（agent）自身也应放下，**不要主动提及**：",
+              ""]
+     for s in supp.get("suppressed", []):
++        if not isinstance(s, dict):
++            continue
+         ent = s.get("entity")
+         kind = s.get("kind")
+         reason = s.get("reason") or "用户要求遗忘"
+@@ -813,19 +1235,42 @@ def cmd_recover(refs_dir):
+         print(json.dumps({"status": "ok", "recovered": 0, "reason": "empty_wal"}))
+         return
+ 
+-    entries = [json.loads(l) for l in lines]
++    # === PATCH v2.8.3 (3.3d) === 逐行解析并跳过损坏行。此前用列表推导整体
++    # json.loads，WAL 里只要混进一行断电写坏的内容，整个 recover 就抛
++    # JSONDecodeError 退出——恰恰在最需要恢复的崩溃场景下彻底失效。
++    entries = []
++    bad_lines = 0
++    for ln in lines:
++        try:
++            obj = json.loads(ln)
++        except (json.JSONDecodeError, ValueError):
++            bad_lines += 1
++            continue
++        if isinstance(obj, dict):
++            entries.append(obj)
++        else:
++            bad_lines += 1
++    if bad_lines:
++        sys.stderr.write(f"[memory_recover] 跳过 {bad_lines} 行损坏 WAL 记录\n")
++
+     committed = set()
+     for e in entries:
+         if e.get("op") == "commit":
+             committed.add((e.get("entity"), e.get("memory_id")))
+ 
++    # === PATCH v2.8.3 (P0-1) === 已落盘的 memory_id 也算已完成。
++    # 双保险：即便历史 WAL 里残留了旧版本产生的孤儿 upsert，只要对应记录
++    # 已在 memory.json 中存在，就不再重放，避免无限自我复制。
++    existing_ids = {m.get("id") for m in read_json_typed(os.path.join(refs_dir, "memory.json"), list)
++                    if isinstance(m, dict)}
++
+     uncommitted_map = {}
+     for e in entries:
+         if e.get("op") != "upsert":
+             continue
+         ent = e.get("entity")
+         mid = e.get("memory_id", "")
+-        if (ent, mid) in committed:
++        if (ent, mid) in committed or mid in existing_ids:
+             continue
+         uncommitted_map[(ent, mid)] = e
+ 
+@@ -834,30 +1279,32 @@ def cmd_recover(refs_dir):
+         print(json.dumps({"status": "ok", "recovered": 0, "reason": "all_committed"}))
+         return
+ 
+-    lock_path = os.path.join(refs_dir, ".lock")
+-    if os.path.exists(lock_path):
+-        try:
+-            os.unlink(lock_path)
+-        except Exception:
+-            pass
++    # === PATCH v2.8.3 (P0-5) === 绝不 unlink .lock。
++    # flock 的互斥建立在 inode 上：删掉锁文件后，正持有锁的进程仍以为自己独占，
++    # 而新进程 open 出的是全新 inode 也能立刻拿到锁 —— 两边同时写，互斥形同虚设。
++    # 真正的死锁场景已由 file_lock 内的「持有者进程不存在 → truncate 复用同 inode」处理。
+ 
+     recovered = []
+     for e in uncommitted:
++        ent_name = e.get("entity")
+         try:
++            kind = e.get("kind") or e.get("type") or "general"
++            if kind not in ALLOWED_KINDS:
++                kind = "general"
+             cmd_write(
+-                e["entity"],
+-                e.get("type", "general"),
+-                e["value"],
++                ent_name,
++                kind,
++                e.get("value", ""),
+                 refs_dir,
+                 mode="local",
+                 sentiment=e.get("sentiment"),
+                 source=e.get("source", "auto_detect"),
+-                confidence=e.get("confidence", 1.0),
++                confidence=_safe_float(e.get("confidence", 1.0), 1.0),
+                 emotion_tags=e.get("emotion_tags"),
+             )
+-            recovered.append(e["entity"])
++            recovered.append(ent_name)
+         except Exception as ex:
+-            print(json.dumps({"error": f"recover failed for '{e['entity']}': {ex}"}))
++            sys.stderr.write(f"[memory_recover] recover failed for {ent_name!r}: {ex}\n")
+ 
+     print(json.dumps({
+         "status": "recovered" if recovered else "partial",
+@@ -870,22 +1317,37 @@ def cmd_recover(refs_dir):
+ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
+     today = datetime.now(TZ).date().isoformat()   # === PATCH v2.6 A2 === 统一用 TZ
+     well_path = os.path.join(refs_dir, "wellness.json")
+-    data = {"records": []}
+-    if os.path.exists(well_path):
+-        with open(well_path, "r", encoding="utf-8") as wf:
+-            data = json.load(wf)
++    # === PATCH v2.8.3 (3.3c) === 改走 read_json_typed。此前直接 json.load，
++    # wellness.json 一旦损坏就抛 JSONDecodeError，连"记一下今天心情"都做不了。
++    data = read_json_typed(well_path, dict, refs_dir, "wellness")
++    if not isinstance(data.get("records"), list):
++        data["records"] = []
+ 
+     entry = {
+         "date": today,
+-        "mood": mood,
++        "mood": _safe_str(mood),
+         "recorded_at": ts_now(),   # === PATCH v2.6 A2 === 改用 ts_now()，全库统一 UTC+8
+     }
+-    if sleep_hours and sleep_hours != "-":
+-        entry["sleep_hours"] = float(sleep_hours)
++    # === PATCH v2.8.3 (P0-4) === sleep_hours 分三档处理：
++    #   ① 空 / "-"          → 不记该字段
++    #   ② 完全无法解析成数字（"abc"/"八小时"）→ 温和忽略并告警，不打断心情记录
++    #   ③ 能解析但值非法（NaN/Inf/1e400/负数/>24）→ 明确拒绝。
++    #      NaN、Inf 若落盘会让 wellness.json 出现裸 NaN 字面量，非 Python 客户端
++    #      从此无法解析整个文件；负数/超 24 小时则是明显的脏数据。
++    if sleep_hours not in (None, "", "-"):
++        raw = sleep_hours.strip() if isinstance(sleep_hours, str) else sleep_hours
++        try:
++            parsed = float(raw)
++        except (TypeError, ValueError):
++            parsed = None
++            sys.stderr.write(f"[memory_wellness] sleep_hours={sleep_hours!r} 无法解析为数字，已忽略该字段\n")
++        if parsed is not None:
++            entry["sleep_hours"] = _require_finite("sleep_hours", parsed,
++                                                   SLEEP_HOURS_MIN, SLEEP_HOURS_MAX)
+     if sleep_quality and sleep_quality != "-":
+-        entry["sleep_quality"] = sleep_quality
++        entry["sleep_quality"] = _safe_str(sleep_quality)
+     if note and note != "-":
+-        entry["note"] = note
++        entry["note"] = _safe_str(note)
+ 
+     data["records"].append(entry)
+     safe_write_json(well_path, data)
+@@ -963,7 +1425,8 @@ def main():
+                 elif args[i] == "--source" and i + 1 < len(args):
+                     source = args[i + 1]; i += 2
+                 elif args[i] == "--confidence" and i + 1 < len(args):
+-                    confidence = float(args[i + 1]); i += 2
++                    # 校验交给 cmd_write 的 _require_finite（CLI 传 nan/inf 同样会被拒）
++                    confidence = args[i + 1]; i += 2
+                 elif args[i] == "--emotion-tags" and i + 1 < len(args):
+                     emotion_tags = [t.strip() for t in args[i + 1].split(",") if t.strip()]; i += 2
+                 elif args[i] == "--reason" and i + 1 < len(args):
