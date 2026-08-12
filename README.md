@@ -173,3 +173,19 @@ MT_PYTHON=/path/to/your/python3 python3 verify_mcp_stdio.py
 ## 许可
 
 MIT（模板本身）。可选依赖 mcp-memory-graph 采用 PolyForm Noncommercial——个人 / 非商业免费，商业需购授权，见其仓库 `COMMERCIAL.md`。
+
+## 文档与维护
+
+- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 11 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
+- **给人看（手动保养）**：`维护指南.md` —— 9 个维护工具逐个说明、每周维护清单、概念速查、FAQ。
+- **每周记忆健康周报**：`scripts/weekly_health_report.py` —— 跑 `backup→decay→vacuum→selfcheck→stats`，把核心数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题推给主人（Bark 需自备 key）。
+
+  ```bash
+  # 定时任务示例（每周日 09:00）
+  BARK_KEY=<你的Bark设备key> /path/to/venv/python scripts/weekly_health_report.py \
+    --refs-dir <你的记忆库目录> --bark
+  # 只出报告不改数据：
+  python scripts/weekly_health_report.py --refs-dir <DIR> --dry-run --no-bark
+  ```
+
+> ⚠️ 只调 `write`+`search` 等于白装：遗忘曲线、健康体检、归档等智能机制全靠 `decay`/`vacuum`/`stats` 等工具触发，必须排每周定时任务自动跑（不要等用户提醒）。Bark key 等敏感信息请通过环境变量传入，切勿写进仓库。

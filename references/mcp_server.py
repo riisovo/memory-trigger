@@ -144,31 +144,31 @@ def memory_forget(entity_or_id: str, refs_dir: str = "", reason: str = "", kind:
 
 @mcp.tool()
 def memory_stats(refs_dir: str = "") -> str:
-    """记忆库体检：实体数、active/pending/superseded 数量、核心记忆数、平均权重、最弱记忆、最久未召回排行。想知道『TA 现在记得多少』就调它。"""
+    """记忆库体检：实体数、active/pending/superseded 数量、核心记忆数、平均权重、最弱记忆、最久未召回排行。想知道『TA 现在记得多少』就调它。★ 属于【每周定时维护】第 3 步，应排定时任务自动跑，结果推给主人。"""
     return json.dumps(_call(wp.cmd_stats, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()
 def memory_decay(refs_dir: str = "") -> str:
-    """梦境周期：对全部 active 非 core 记忆统一应用遗忘衰减（半衰期≈138 天）。可定时跑，让久不提的记忆慢慢淡化、重要的被反复唤起而保持。"""
+    """梦境周期：对全部 active 非 core 记忆统一应用遗忘衰减（半衰期≈138 天）。★ 属于【每周定时维护】第 1 步，必须排定时任务自动跑（如每周日），不要等用户提醒——否则遗忘曲线永远不触发，记忆库退化成普通文件。让久不提的记忆慢慢淡化、重要的被反复唤起而保持。"""
     return json.dumps(_call(wp.cmd_decay, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()
 def memory_vacuum(refs_dir: str = "") -> str:
-    """清理：把 >90 天前 superseded 的记忆归档到 .archive/，主库瘦身。"""
+    """清理：把 >90 天前 superseded 的记忆归档到 .archive/，主库瘦身。★ 属于【每周定时维护】第 2 步，应排定时任务自动跑。"""
     return json.dumps(_call(wp.cmd_vacuum, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()
 def memory_backup(refs_dir: str = "") -> str:
-    """备份 memory.json / entity_index.json 到 .backup/（保留最近 10 份）。"""
+    """备份 memory.json / entity_index.json 到 .backup/（保留最近 10 份）。★ 可并入【每周定时维护】第 5 步做兜底；大改记忆库前也先跑一次。"""
     return json.dumps(_call(wp.cmd_backup, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()
 def memory_selfcheck(refs_dir: str = "") -> str:
-    """自检并修复记忆库：扫描缺 entity 的旧记录（早期手写入库遗留），自动补全并打日志，返回修复摘要。"""
+    """自检并修复记忆库：扫描缺 entity 的旧记录（早期手写入库遗留），自动补全并打日志，返回修复摘要。★ 可并入【每周定时维护】第 4 步顺手跑。"""
     return json.dumps(_call(wp.cmd_selfcheck, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
@@ -201,14 +201,35 @@ def memory_init(mode: str = "local", refs_dir: str = "") -> str:
 
 @mcp.prompt()
 def remember_guidance() -> str:
-    """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用记忆工具（否则工具形同虚设）。"""
+    """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用全部记忆工具（否则只调 search/write，记忆库退化成普通文件，遗忘/健康机制形同虚设）。"""
     return (
-        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_write / memory_search / memory_forget 等）。请主动运用它，不要等用户提醒：\n"
-        "- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动调用 memory_write 写入。\n"
-        "- 对话中遇到相关情境，主动调用 memory_search 回想已有记忆。\n"
-        "- 首提先挂起（source=self_inferred 且 confidence<0.8 自动 pending）、二次确认再落盘；用户明说的（source=user_explicit）永远优先、冲突时绝对赢。\n"
-        "- 关系(relationship) / 身份(identity) 类记忆默认 core=true 永不衰减，重要的事大胆钉死。\n"
-        "- 用户说『别提了 / 忘了 X』，调用 memory_forget 做双向遗忘。"
+        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 11 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——"
+        "否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。\n"
+        "\n"
+        "## 一、日常（对话中自然触发，随时调）\n"
+        "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；"
+        "用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。\n"
+        "- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。\n"
+        "- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。\n"
+        "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。\n"
+        "\n"
+        "## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）\n"
+        "每个记忆库应有一项每周自动执行的维护，调用顺序：\n"
+        "1) memory_decay —— 对全部 active 非 core 记忆统一遗忘衰减（半衰期≈138 天），让久不提的慢慢淡、常提的稳住。\n"
+        "2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。\n"
+        "3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。\n"
+        "4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。\n"
+        "5) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。\n"
+        "\n"
+        "## 三、异常恢复（按需）\n"
+        "- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。\n"
+        "- memory_init：仅首次部署 / 新建库时调一次。\n"
+        "\n"
+        "## 四、红线\n"
+        "- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。\n"
+        "- 用户明说的记忆永不自动遗忘、永不降权。\n"
+        "- decay / vacuum / stats / selfcheck / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；"
+        "若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。"
     )
 
 
