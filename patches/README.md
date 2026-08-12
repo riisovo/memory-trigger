@@ -6,7 +6,8 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
   • 停在 v2.8.0 的用户  → memory-trigger-v2.8.0-v2.8.3-combined.patch
   • 停在 v2.8.1 的用户  → memory-trigger-v2.8.1-v2.8.3-combined.patch
 
-（GitHub main / 线上克隆当前就是 v2.8.1，绝大多数是这份。两份都已在本地用
+（GitHub main / 线上克隆当前已是 **v2.8.3 终态**，新部署直接 clone/pull 主线即可；
+停在 v2.8.0 / v2.8.1 的外部老部署才需要本补丁（绝大多数是 v2.8.1 那份）。两份都已在本地用
  git apply --check 验证可干净 apply。）
 
 包含改动（相对你当前版本）

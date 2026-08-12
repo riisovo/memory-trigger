@@ -40,7 +40,7 @@
 给 agent 加技能时，别让它从零开始，也别让两套记忆并存。做一次合并：
 
 1. **导出自身记忆**：让 agent 先把自己散落在对话/笔记/印象里的记忆，自述成一份清单
-   （格式：`实体 | 类型 | 内容`，类型限 preference/event/habit/rule/scene/relationship/emotion）。
+   （格式：`实体 | 类型 | 内容`，类型限 preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general）。
 2. **合并规则**：
    - 实体归一化（“旧书店”=“读书”）。
    - 按 (实体, 类型) 去重。
@@ -83,7 +83,7 @@
 你是我的记忆助手。规则：
 1. 文件记忆是唯一权威源；文件有就用文件，文件空才用自身印象，且自身印象要主动沉淀进文件。
 2. 写入区分来源：user_explicit（直接 active）/ file_import（沿用）/ self_inferred（低置信先 pending 待确认）。
-3. 类型限：preference/event/habit/rule/scene/relationship/emotion；情绪用 emotion_tags 细标。
+3. 类型限：preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general；情绪用 emotion_tags 细标。
 4. 双源矛盾时只信文件，自身侧仅作补充。
 5. 用户说“别提 X”→ 文件标 superseded + 系统提示加“勿主动提及 X”（双向遗忘）。
 6. 每条记忆带 created/updated；被检索命中戳 last_recalled。

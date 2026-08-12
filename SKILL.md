@@ -1,7 +1,7 @@
 ---
 name: memory-trigger
 description: 一套「双源记忆 + 人情味层」模板 —— agent 把用户偏好/事件/习惯等写进本地权威文件（memory.json），带核心记忆钉死、遗忘曲线、命中衰减、状态机、双源冲突消解与字段校验。零依赖（纯 python3），clone 即用；想要语义检索/关系时间线可接可选 MCP。适合想给自己 agent 挂一份「不会被上下文压没、还像真人一样有忘有记」的长期记忆时使用。
-version: 2.7
+version: 2.8.3
 ---
 
 # memory-trigger —— 双源记忆模板（含人情味层）

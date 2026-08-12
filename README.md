@@ -7,6 +7,8 @@
 - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
 - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
 
+> 当前版本 **v2.8.3**（双源信任 + 人情味层 + v2.8.2 entity 自愈 + v2.8.3 三十项加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
+
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
 
 **v2.8** —— 拆耦合：graph 镜像独立为可选后端，核心文件默认**零 sqlite3 依赖**
@@ -19,6 +21,10 @@
 - `kind` 参数：由 `str` 改为 `Literal[10 类]`。FastMCP 在工具 schema 生成枚举，调用方传非法 `kind`（如 `reference`）在进函数前就被框架前置拦截，不再一轮轮试错。
 - 权限错误提示：`safe_write_json` / `wal_append` 捕获 `PermissionError`，改写为直白中文——点明记忆库目录是 root/他人建的、当前进程没写权限，或 `mirror_mode=graph` 的 sqlite 库不可写。不再只抛干巴巴的 `Errno 13`。
 - 实测：MCP schema 验证（kind 枚举 / core 布尔）+ 直接调用落盘 + 非法 kind 清晰报错 + 权限提示改写，9/9 通过；原有 `test_dual_source` 20/20 + 27/27 回归全过。
+
+**v2.8.2** —— 存量防线：entity 必填校验（杜绝新的缺 entity 记录）+ 记忆目录首次触达自动 `selfcheck` 自愈缺 entity 旧记录 + 暴露 `memory_selfcheck` 工具。
+
+**v2.8.3** —— 三十项加固：① 数据安全(P0)：损坏文件隔离 + 从 `.backup` 恢复、WAL upsert 幂等去重（根治无限重放）、recover 不再破坏他进程 flock 互斥、search 锁内读改写、备份 write-through（零丢失）、严格 JSON（禁裸 NaN/Infinity）、同日归档文件名冲突修复；② 脏数据鲁棒(P1)：所有方括号直取改 `.get` 兜底、缺字段全程 try、锁损坏回退 TimeoutError、wellness 数值校验；③ 语义精确(P2)：空 / 纯空格 entity 拒绝、normalize_entity 不再子串吞并、search 不改写查询词 / 不倒库、forget 清理 suppressed 状态、confidence 越界拒绝。
 
 ## 它解决什么
 
@@ -50,11 +56,30 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 > 把下面这段复制进你的 SOUL / 系统人设 / 系统提示：
 
 ```
-【记忆自觉】你已配置 memory-trigger 长期记忆。请主动运用它，不要等用户提醒：
-- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动写入记忆。
-- 对话中遇到相关情境，主动回想已有记忆。
-- 首提先挂起、二次确认再落盘；用户明说的永远优先。
-没有这层自觉，记忆工具形同虚设——你该自己判断什么值得记。
+【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 11 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
+
+## 一、日常（对话中自然触发，随时调）
+- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。
+- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。
+- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。
+- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。
+
+## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）
+每个记忆库应有一项每周自动执行的维护，调用顺序：
+1) memory_decay —— 对全部 active 非 core 记忆统一遗忘衰减（半衰期≈138 天），让久不提的慢慢淡、常提的稳住。
+2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。
+3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。
+4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。
+5) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。
+
+## 三、异常恢复（按需）
+- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。
+- memory_init：仅首次部署 / 新建库时调一次。
+
+## 四、红线
+- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。
+- 用户明说的记忆永不自动遗忘、永不降权。
+- decay / vacuum / stats / selfcheck / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。
 ```
 
 只有 agent 宿主（自带循环 + 已读 SKILL.md）会天然按规则自驱；其余宿主靠这句指令把「主动调取」的意识种进去。若你走 MCP 模式，可直接让 AI 拉取 server 暴露的 `remember_guidance` Prompt，效果等同、免手抄。

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_dual_source.py —— v2.6 双源补丁自动化测试
+test_dual_source.py —— memory-trigger 双源记忆自动化测试（覆盖双源信任 / 人情味层 / 遗忘曲线；当前 v2.8.3）
 覆盖：last_recalled 戳时间 / source 标签 + pending / 情感 schema / 检索源排序 /
       双向遗忘 forget / 双源合并迁移（冲突以文件为准 + 字段校验）。
 运行：python3 test_dual_source.py
