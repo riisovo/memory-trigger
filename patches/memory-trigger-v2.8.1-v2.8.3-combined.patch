@@ -1,3 +1,236 @@
+diff --git "a/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md" "b/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
+index e5932dd..f683dac 100644
+--- "a/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
++++ "b/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
+@@ -66,7 +66,7 @@ python -c "import mcp; print('ok')"
+ 首次接上后，让你的 AI 调一次 `memory_init`，或者手动跑：
+ 
+ ```bash
+-python references/write_pipeline.py init /你的记忆库路径
++python references/write_pipeline.py init local /你的记忆库路径   # 目录不存在会自动创建；mode 必须显式写（local 或 graph）
+ ```
+ 
+ 会生成 `memory.json` / `aliases.json` / `wellness.json` 等文件，记忆库就建好了。
+@@ -99,7 +99,7 @@ cd references && python3 verify_mcp_stdio.py
+ # 或指定解释器：MT_PYTHON=/你的python路径 python3 verify_mcp_stdio.py
+ ```
+ 
+-它会真拉起 server 子进程、走完整 stdio 握手，验证 10 个工具 + 1 个 Prompt + 双源信任闭环。
++它会真拉起 server 子进程、走完整 stdio 握手，验证 11 个工具 + 1 个 Prompt + 双源信任闭环。
+ 
+ ---
+ 
+@@ -112,9 +112,9 @@ cd references && python3 verify_mcp_stdio.py
+ 
+ ---
+ 
+-## 接上后 AI 能调的 10 个工具
++## 接上后 AI 能调的 11 个工具
+ 
+-`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_recover` / `memory_wellness` / `memory_init` —— 具体行为见 SKILL.md。
++`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 具体行为见 SKILL.md。
+ 
+ ---
+ 
+diff --git a/MEMORY_RULES.md b/MEMORY_RULES.md
+index 2f49b12..0ebec22 100644
+--- a/MEMORY_RULES.md
++++ b/MEMORY_RULES.md
+@@ -40,7 +40,7 @@
+ 给 agent 加技能时，别让它从零开始，也别让两套记忆并存。做一次合并：
+ 
+ 1. **导出自身记忆**：让 agent 先把自己散落在对话/笔记/印象里的记忆，自述成一份清单
+-   （格式：`实体 | 类型 | 内容`，类型限 preference/event/habit/rule/scene/relationship/emotion）。
++   （格式：`实体 | 类型 | 内容`，类型限 preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general）。
+ 2. **合并规则**：
+    - 实体归一化（“旧书店”=“读书”）。
+    - 按 (实体, 类型) 去重。
+@@ -83,7 +83,7 @@
+ 你是我的记忆助手。规则：
+ 1. 文件记忆是唯一权威源；文件有就用文件，文件空才用自身印象，且自身印象要主动沉淀进文件。
+ 2. 写入区分来源：user_explicit（直接 active）/ file_import（沿用）/ self_inferred（低置信先 pending 待确认）。
+-3. 类型限：preference/event/habit/rule/scene/relationship/emotion；情绪用 emotion_tags 细标。
++3. 类型限：preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general；情绪用 emotion_tags 细标。
+ 4. 双源矛盾时只信文件，自身侧仅作补充。
+ 5. 用户说“别提 X”→ 文件标 superseded + 系统提示加“勿主动提及 X”（双向遗忘）。
+ 6. 每条记忆带 created/updated；被检索命中戳 last_recalled。
+diff --git a/README.md b/README.md
+index 36b7fc4..742c90b 100644
+--- a/README.md
++++ b/README.md
+@@ -7,6 +7,8 @@
+ - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
+ - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
+ 
++> 当前版本 **v2.8.3**（双源信任 + 人情味层 + v2.8.2 entity 自愈 + v2.8.3 三十项加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
++
+ **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
+ 
+ **v2.8** —— 拆耦合：graph 镜像独立为可选后端，核心文件默认**零 sqlite3 依赖**
+@@ -20,6 +22,10 @@
+ - 权限错误提示：`safe_write_json` / `wal_append` 捕获 `PermissionError`，改写为直白中文——点明记忆库目录是 root/他人建的、当前进程没写权限，或 `mirror_mode=graph` 的 sqlite 库不可写。不再只抛干巴巴的 `Errno 13`。
+ - 实测：MCP schema 验证（kind 枚举 / core 布尔）+ 直接调用落盘 + 非法 kind 清晰报错 + 权限提示改写，9/9 通过；原有 `test_dual_source` 20/20 + 27/27 回归全过。
+ 
++**v2.8.2** —— 存量防线：entity 必填校验（杜绝新的缺 entity 记录）+ 记忆目录首次触达自动 `selfcheck` 自愈缺 entity 旧记录 + 暴露 `memory_selfcheck` 工具。
++
++**v2.8.3** —— 三十项加固：① 数据安全(P0)：损坏文件隔离 + 从 `.backup` 恢复、WAL upsert 幂等去重（根治无限重放）、recover 不再破坏他进程 flock 互斥、search 锁内读改写、备份 write-through（零丢失）、严格 JSON（禁裸 NaN/Infinity）、同日归档文件名冲突修复；② 脏数据鲁棒(P1)：所有方括号直取改 `.get` 兜底、缺字段全程 try、锁损坏回退 TimeoutError、wellness 数值校验；③ 语义精确(P2)：空 / 纯空格 entity 拒绝、normalize_entity 不再子串吞并、search 不改写查询词 / 不倒库、forget 清理 suppressed 状态、confidence 越界拒绝。
++
+ ## 它解决什么
+ 
+ - **记不住**：上下文一满，前面说的话全忘。
+@@ -50,11 +56,30 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要
+ > 把下面这段复制进你的 SOUL / 系统人设 / 系统提示：
+ 
+ ```
+-【记忆自觉】你已配置 memory-trigger 长期记忆。请主动运用它，不要等用户提醒：
+-- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动写入记忆。
+-- 对话中遇到相关情境，主动回想已有记忆。
+-- 首提先挂起、二次确认再落盘；用户明说的永远优先。
+-没有这层自觉，记忆工具形同虚设——你该自己判断什么值得记。
++【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 11 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
++
++## 一、日常（对话中自然触发，随时调）
++- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。
++- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。
++- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。
++- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。
++
++## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）
++每个记忆库应有一项每周自动执行的维护，调用顺序：
++1) memory_decay —— 对全部 active 非 core 记忆统一遗忘衰减（半衰期≈138 天），让久不提的慢慢淡、常提的稳住。
++2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。
++3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。
++4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。
++5) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。
++
++## 三、异常恢复（按需）
++- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。
++- memory_init：仅首次部署 / 新建库时调一次。
++
++## 四、红线
++- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。
++- 用户明说的记忆永不自动遗忘、永不降权。
++- decay / vacuum / stats / selfcheck / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。
+ ```
+ 
+ 只有 agent 宿主（自带循环 + 已读 SKILL.md）会天然按规则自驱；其余宿主靠这句指令把「主动调取」的意识种进去。若你走 MCP 模式，可直接让 AI 拉取 server 暴露的 `remember_guidance` Prompt，效果等同、免手抄。
+@@ -78,7 +103,7 @@ bash install.sh
+ 
+ ## 5 分钟上手
+ 
+-下面用最小例子跑通「写一条 → 搜出来 → 看统计」。在模板根目录执行（记忆库以 `references/` 为例，可换成你自己的目录；首次跑 `bash install.sh` 会初始化它）。
++下面用最小例子跑通「写一条 → 搜出来 → 看统计」。在模板根目录执行（记忆库以 `references/` 为例，可换成你自己的目录；首次 `write` 会自动建库，或先跑 `init local /你的记忆库路径` 显式初始化——`install.sh` 只跑自检和测试，不会建库）。
+ 
+ ### 命令行模式（零依赖）
+ 
+@@ -88,7 +113,7 @@ python3 references/write_pipeline.py write "读书" preference "爱吃科幻小
+ 
+ # 2) 搜出来
+ python3 references/write_pipeline.py search "科幻" references/
+-# → 命中上面那条，并标注 authority=user_explicit
++# → 命中上面那条，并标注 _authority: "file"（source=user_explicit 属文件权威层，故 authority 为 file 而非 user_explicit）
+ 
+ # 3) 看统计（active / pending / 核心记忆数一目了然）
+ python3 references/write_pipeline.py stats references/
+@@ -149,14 +174,14 @@ pip install -r references/mcp_requirements.txt     # 或：uv pip install -r ref
+ 
+ ### 暴露的工具与 Prompt
+ 
+-- **10 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_recover` / `memory_wellness` / `memory_init` —— 一一对应本地层命令，双源信任 / 人情味层逻辑完全复用。
++- **11 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 一一对应本地层命令（含 `selfcheck` 自检），双源信任 / 人情味层逻辑完全复用。
+ - **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，就等于把「主动记」的意识种进去——省去手抄那段话。
+ 
+ > ⚠️ 关键提醒（与上方「让 AI 主动记」同义）：**MCP 只负责把工具递到 AI 手边，不制造「主动调用」的意识。** 务必让 AI 读 `remember_guidance` 或把那段指令写进 SOUL，否则再聪明的模型也只会在你下令时才记。工具箱打开 ≠ AI 自己会开箱。
+ 
+ ### 端到端验证（可选）
+ 
+-部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 10 工具 + 1 Prompt + 双源信任闭环：
++部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 11 工具 + 1 Prompt + 双源信任闭环：
+ 
+ ```bash
+ cd references && python3 verify_mcp_stdio.py
+@@ -173,3 +198,19 @@ MT_PYTHON=/path/to/your/python3 python3 verify_mcp_stdio.py
+ ## 许可
+ 
+ MIT（模板本身）。可选依赖 mcp-memory-graph 采用 PolyForm Noncommercial——个人 / 非商业免费，商业需购授权，见其仓库 `COMMERCIAL.md`。
++
++## 文档与维护
++
++- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 11 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
++- **给人看（手动保养）**：`维护指南.md` —— 9 个维护工具逐个说明、每周维护清单、概念速查、FAQ。
++- **每周记忆健康周报**：`scripts/weekly_health_report.py` —— 跑 `backup→decay→vacuum→selfcheck→stats`，把核心数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题推给主人（Bark 需自备 key）。
++
++  ```bash
++  # 定时任务示例（每周日 09:00）
++  BARK_KEY=<你的Bark设备key> /path/to/venv/python scripts/weekly_health_report.py \
++    --refs-dir <你的记忆库目录> --bark
++  # 只出报告不改数据：
++  python scripts/weekly_health_report.py --refs-dir <DIR> --dry-run --no-bark
++  ```
++
++> ⚠️ 只调 `write`+`search` 等于白装：遗忘曲线、健康体检、归档等智能机制全靠 `decay`/`vacuum`/`stats` 等工具触发，必须排每周定时任务自动跑（不要等用户提醒）。Bark key 等敏感信息请通过环境变量传入，切勿写进仓库。
+diff --git a/SHARE.md b/SHARE.md
+index 195d117..fca400b 100644
+--- a/SHARE.md
++++ b/SHARE.md
+@@ -33,4 +33,4 @@ python3 references/write_pipeline.py stats references/
+ 
+ ## 升级
+ 
+-只换 `references/write_pipeline.py` + `SKILL.md` 即可，记忆数据 `references/memory.json` 不受影响（建议先 `backup`）。
++v2.8.x 之后改过的文件都要一起换：`references/write_pipeline.py`、`references/mcp_server.py`、`references/graph_backend.py`、`references/merge_migrate.py`、`SKILL.md`、`references/mcp_requirements.txt`（依赖加上限）。记忆数据 `memory.json` 不受影响（建议先 `backup`）。也可直接用 `patches/` 下的合并补丁本地 apply，无需逐个换文件。
+diff --git a/SKILL.md b/SKILL.md
+index 1e2ced4..a09aaae 100644
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,7 +1,7 @@
+ ---
+ name: memory-trigger
+ description: 一套「双源记忆 + 人情味层」模板 —— agent 把用户偏好/事件/习惯等写进本地权威文件（memory.json），带核心记忆钉死、遗忘曲线、命中衰减、状态机、双源冲突消解与字段校验。零依赖（纯 python3），clone 即用；想要语义检索/关系时间线可接可选 MCP。适合想给自己 agent 挂一份「不会被上下文压没、还像真人一样有忘有记」的长期记忆时使用。
+-version: 2.7
++version: 2.8.3
+ ---
+ 
+ # memory-trigger —— 双源记忆模板（含人情味层）
+@@ -73,7 +73,7 @@ python3 references/write_pipeline.py forget "读书" references/
+ 
+ ### 3.3 status 状态机
+ 
+-`"status": "active|pending|superseded"`（记忆层）；实体层另有 `confirmed|pending`。
++`"status": "active|pending|superseded"`（记忆层）。实体索引（`entity_index.json`）的每实体只记 `confirmed`（已沉淀），写路径从不写 pending——故无实体层 pending 状态。
+ 
+ - `active`：生效，`search` 只返回这一档（`pending`/`superseded` 不泄漏）。
+ - `pending`：待确认（多为低置信自推断）。
+@@ -84,7 +84,7 @@ python3 references/write_pipeline.py forget "读书" references/
+ 让 agent 的记忆不像冷冰冰的数据库，而像真人——重要的钉死，久不提的慢慢淡。
+ 
+ - **核心记忆钉死 `core`**：`relationship` / `identity` 这两类默认就是核心记忆（`core=true`），代表「我们是谁」的基石，**永不衰减**（比如「我们是恋人」「我是谁」不会因为久不提就消失）。写其他类型时可用 `--core true|false` 显式覆盖（例如把一条特别重要的约定钉成核心）。
+-- **遗忘曲线 `importance`**：每条非核心记忆带 `importance`（初始 1.0）。每次被 `search` 命中，按 `importance *= 0.995 ** 天_距_上次_召回` 衰减（半衰期≈138 天，慢忘）；常聊的话题被反复唤起、权重稳得住，冷掉的话题自然淡化。`core` 记忆不参与衰减。
++- **遗忘曲线 `importance`**：每条非核心记忆带 `importance`（初始 1.0）。每次被 `search` 命中，按 `importance *= 0.995 ** 天_距_上次_召回` 衰减（半衰期≈138 天，慢忘）；常聊的话题因「距上次召回」天数小、衰减很慢、长期稳在高位，冷掉的话题自然淡化——但注意：**importance 是单调递减的，召回只重置计时、不加分**，连续 138 天完全不提仍会减半。`core` 记忆不参与衰减。
+ - **梦境周期 `decay` 命令**：可定期（如每周巡检）跑一次 `decay`，对全库久不提的非核心记忆统一衰减，模拟「睡一觉、淡掉的更淡」。
+ - `stats` 会报告核心记忆数、非核心平均权重、最弱记忆排行，便于观察记忆的健康度。
+ 
+@@ -161,7 +161,7 @@ pip install -r references/mcp_requirements.txt     # 需 Python 3.10+
+ 
+ > ⚠️ **启动失败最常见原因**：`command` 须指向**已安装 `mcp` 包**的 Python 解释器（跑过 `pip install -r references/mcp_requirements.txt` 的那个）。用 `uv` 则改 `command` 为 `"uv"`、`args` 为 `["run", "<模板绝对路径>/references/mcp_server.py"]`。
+ 
+-- 暴露 **10 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_recover` / `memory_wellness` / `memory_init`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。
++- 暴露 **11 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。
+ - 暴露 **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，即种下主动调用意识——见 §0「接入必做」。
+ 
+ > 同样的前提：MCP 只给工具，不给「主动」。**务必让接入的 AI 读 `remember_guidance` 或把那段指令写进 SOUL**，否则接了也只等你下令才记。
+diff --git a/package.json b/package.json
+index 1fdb95d..6d6b769 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "memory-trigger",
+-  "version": "2.7.0",
++  "version": "2.8.3",
+   "description": "AI 伴侣记忆引擎 — 让 Agent 记住你是谁、怎么叫你、你喜欢什么、你们经历过什么",
+   "bin": {
+     "memory-trigger": "./install.sh"
 diff --git a/references/mcp_requirements.txt b/references/mcp_requirements.txt
 index e062bdd..123a993 100644
 --- a/references/mcp_requirements.txt
@@ -181,6 +414,32 @@ index 12f36e0..142bc48 100644
      return entity
  
  
+diff --git a/references/test_dual_source.py b/references/test_dual_source.py
+index 497afb4..308c63d 100644
+--- a/references/test_dual_source.py
++++ b/references/test_dual_source.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ """
+-test_dual_source.py —— v2.6 双源补丁自动化测试
++test_dual_source.py —— memory-trigger 双源记忆自动化测试（覆盖双源信任 / 人情味层 / 遗忘曲线；当前 v2.8.3）
+ 覆盖：last_recalled 戳时间 / source 标签 + pending / 情感 schema / 检索源排序 /
+       双向遗忘 forget / 双源合并迁移（冲突以文件为准 + 字段校验）。
+ 运行：python3 test_dual_source.py
+diff --git a/references/verify_mcp_stdio.py b/references/verify_mcp_stdio.py
+index 0cc2a42..8c2c4cd 100644
+--- a/references/verify_mcp_stdio.py
++++ b/references/verify_mcp_stdio.py
+@@ -8,7 +8,7 @@
+     python3 references/verify_mcp_stdio.py
+ 
+ 它会真实拉起 server 子进程、通过 stdio 传输调用工具，验证：
+-  - 10 个 MCP 工具 + 1 个 Prompt 注册齐全
++  - 11 个 MCP 工具 + 1 个 Prompt 注册齐全
+   - 双源信任：user_explicit 直接落盘 core 钉死；self_inferred 低置信挂 pending 不进检索
+   - 双向遗忘：forget 后检索归零
+ """
 diff --git a/references/write_pipeline.py b/references/write_pipeline.py
 index d6ebfdb..1d7b70f 100644
 --- a/references/write_pipeline.py
@@ -1383,3 +1642,334 @@ index d6ebfdb..1d7b70f 100644
          else:
              print(json.dumps({"error": f"未知命令: {cmd}"}), file=sys.stderr)
              sys.exit(1)
+diff --git a/scripts/audit_memory_kit.py b/scripts/audit_memory_kit.py
+index ac50fc5..289f5e5 100644
+--- a/scripts/audit_memory_kit.py
++++ b/scripts/audit_memory_kit.py
+@@ -194,7 +194,7 @@ def main():
+     print("\n--- 7. install.sh 自检覆盖 ---")
+     if os.path.isfile(install_sh):
+         sh = open(install_sh, encoding="utf-8").read()
+-        check("install.sh 跑 v2.6 双源自检 test_dual_source.py",
++        check("install.sh 跑 v2.8 双源自检 test_dual_source.py",
+               'test_dual_source.py' in sh, level="WARN",
+               detail="install.sh 未跑双源自检 test_dual_source.py，v2.6 逻辑装完不验" if 'test_dual_source.py' not in sh else "")
+     else:
+diff --git a/scripts/weekly_health_report.py b/scripts/weekly_health_report.py
+new file mode 100644
+index 0000000..8b8d4e2
+--- /dev/null
++++ b/scripts/weekly_health_report.py
+@@ -0,0 +1,171 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++"""
++memory-trigger · 每周记忆健康周报
++
++对给定 refs_dir 跑一遍维护流水线（backup -> decay -> vacuum -> selfcheck -> stats），
++把体检结果格式化成一份简洁周报，通过 Bark 推给主人。
++
++用法:
++  python weekly_health_report.py --refs-dir <记忆库目录> --bark
++  python weekly_health_report.py --refs-dir <DIR> --dry-run        # 只出报告, 不改数据
++  python weekly_health_report.py --refs-dir <DIR> --no-bark         # 只打印, 不推送
++
++设计要点:
++  - decay/vacuum/selfcheck/backup 属于"写"操作；--dry-run 时全部跳过, 只跑只读的 stats。
++  - Bark 用 icon=(头像) 而非 image=, 与主人既定约定一致。
++"""
++import argparse
++import os
++import sys
++import io
++import json
++import datetime
++import contextlib
++import subprocess
++import urllib.parse
++
++# 让脚本能 import 同仓库的 write_pipeline.py（本脚本在 <repo>/scripts/，逻辑库在 <repo>/references/）
++_HERE = os.path.dirname(os.path.abspath(__file__))
++_REFERENCES = os.path.normpath(os.path.join(_HERE, "..", "references"))
++if _REFERENCES not in sys.path:
++    sys.path.insert(0, _REFERENCES)
++
++import write_pipeline as wp  # noqa: E402
++
++# —— Bark 推送配置（全部来自环境变量；代码里绝不写死任何 key / 私人路径）——
++#   BARK_KEY        : Bark 设备 key（设了才推送；也可改用 BARK_NOTIFY_SH 指向你本机通知脚本）
++#   BARK_NOTIFY_SH  : 可选，指向本机已有的 bark 通知脚本（它自己管 key），设了优先用它
++#   BARK_ICON       : 可选，通知头像 URL（留空用 Bark 默认）
++#   MEMORY_TRIGGER_REFS_DIR: 记忆库目录（不设默认用当前目录）
++BARK_KEY = os.environ.get("BARK_KEY", "")
++BARK_NOTIFY_SH = os.environ.get("BARK_NOTIFY_SH", "")
++BARK_ICON = os.environ.get("BARK_ICON", "")
++DEFAULT_REFS = os.environ.get("MEMORY_TRIGGER_REFS_DIR", ".")
++
++TZ = wp.TZ if hasattr(wp, "TZ") else datetime.timezone(datetime.timedelta(hours=8))
++
++
++def _cap(fn, *args):
++    """write_pipeline 的 cmd_* 都是 print(json) 而非 return；这里重定向 stdout 捕获并解析。"""
++    buf = io.StringIO()
++    with contextlib.redirect_stdout(buf):
++        fn(*args)
++    out = buf.getvalue().strip()
++    try:
++        return json.loads(out)
++    except Exception:
++        return {"_raw": out}
++
++
++def _run_maintenance(refs_dir, dry_run):
++    """返回维护动作的结果摘要。dry_run 时跳过所有写操作。"""
++    summary = {}
++    if dry_run:
++        summary["mode"] = "dry-run (只读)"
++        return summary
++    summary["mode"] = "full"
++    try:
++        _cap(wp.cmd_backup, refs_dir)
++        summary["backup"] = "ok"
++    except Exception as e:
++        summary["backup"] = f"err: {e}"
++    try:
++        d = _cap(wp.cmd_decay, refs_dir)
++        summary["decayed"] = d.get("decayed_count") if isinstance(d, dict) else "?"
++    except Exception as e:
++        summary["decayed"] = f"err: {e}"
++    try:
++        v = _cap(wp.cmd_vacuum, refs_dir)
++        summary["archived"] = v.get("archived") if isinstance(v, dict) else "?"
++    except Exception as e:
++        summary["archived"] = f"err: {e}"
++    try:
++        _cap(wp.cmd_selfcheck, refs_dir)
++        summary["selfcheck"] = "ok"
++    except Exception as e:
++        summary["selfcheck"] = f"err: {e}"
++    return summary
++
++
++def _build_report(refs_dir, maint):
++    stats = _cap(wp.cmd_stats, refs_dir)
++    if not isinstance(stats, dict):
++        stats = {}
++    now = datetime.datetime.now(TZ)
++    lines = []
++    lines.append("🧠 记忆健康周报 %s" % now.strftime("%Y-%m-%d"))
++    lines.append("───")
++    lines.append("核心记忆: %s 条（永不衰减）" % stats.get("core_memories", "?"))
++    lines.append("非核平均权重: %s（越近 1 越鲜活）" % stats.get("avg_importance_noncore", "?"))
++    lines.append("活跃/待确认/过期: %s / %s / %s" % (
++        stats.get("active", "?"), stats.get("pending_memories", "?"), stats.get("superseded", "?")))
++    lines.append("")
++    weakest = stats.get("weakest_active") or []
++    if weakest:
++        lines.append("最弱 5 条（快淡没了）:")
++        for ent, kind, imp in weakest:
++            lines.append("  · %s (%s) 权重 %s" % (ent, kind, imp))
++    lines.append("")
++    stale = stats.get("most_stale_active") or []
++    if stale:
++        lines.append("最久没提 5 个话题:")
++        for ent, kind, age, lr in stale:
++            lr_s = lr if lr else "(从未召回)"
++            lines.append("  · %s (%s) 已 %s 天没召回" % (ent, kind, age))
++    lines.append("")
++    lines.append("本周维护: %s" % json.dumps(maint, ensure_ascii=False))
++    return "\n".join(lines)
++
++
++def _push_bark(title, content):
++    if BARK_NOTIFY_SH and os.path.exists(BARK_NOTIFY_SH):
++        try:
++            r = subprocess.run(["bash", BARK_NOTIFY_SH, title, content],
++                               capture_output=True, text=True, timeout=20)
++            return (r.stdout or r.stderr or "").strip()
++        except Exception as e:
++            return "Bark 推送失败(notify_sh): %s" % e
++    if not BARK_KEY:
++        return "Bark 未配置(BARK_KEY / BARK_NOTIFY_SH 均未设)，跳过推送"
++    title_e = urllib.parse.quote(title)
++    content_e = urllib.parse.quote(content)
++    icon = ("&icon=%s" % urllib.parse.quote(BARK_ICON, safe="")) if BARK_ICON else ""
++    url = "https://api.day.app/%s/%s/%s?isArchive=1%s" % (BARK_KEY, title_e, content_e, icon)
++    try:
++        r = subprocess.run(["curl", "-s", "-m", "15", url], capture_output=True, text=True, timeout=20)
++        return r.stdout.strip() or "(无返回)"
++    except Exception as e:
++        return "Bark 推送失败: %s" % e
++
++
++def main():
++    ap = argparse.ArgumentParser(description="memory-trigger 每周记忆健康周报")
++    ap.add_argument("--refs-dir", default=DEFAULT_REFS, help="记忆库目录（默认 %s）" % DEFAULT_REFS)
++    ap.add_argument("--dry-run", action="store_true", help="只出报告，不跑 decay/vacuum/selfcheck/backup")
++    ap.add_argument("--bark", dest="bark", action="store_true", help="通过 Bark 推送给主人")
++    ap.add_argument("--no-bark", dest="bark", action="store_false", help="只打印不推送")
++    ap.set_defaults(bark=True)
++    args = ap.parse_args()
++
++    refs_dir = os.path.abspath(os.path.expanduser(args.refs_dir))
++    if not os.path.isdir(refs_dir):
++        print("❌ refs_dir 不存在: %s" % refs_dir)
++        sys.exit(1)
++
++    print("[每周维护] refs_dir=%s  dry_run=%s" % (refs_dir, args.dry_run))
++    maint = _run_maintenance(refs_dir, args.dry_run)
++    report = _build_report(refs_dir, maint)
++    print("=" * 40)
++    print(report)
++    print("=" * 40)
++
++    if args.bark:
++        resp = _push_bark("记忆健康周报", report)
++        print("[Bark] %s" % resp)
++    else:
++        print("[Bark] 跳过（--no-bark）")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_dual_source.py b/test_dual_source.py
+index 6765968..7b7d1a7 100644
+--- a/test_dual_source.py
++++ b/test_dual_source.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ """
+-test_dual_source.py —— v2.6 双源补丁自动化测试
++test_dual_source.py —— memory-trigger 双源记忆自动化测试（覆盖双源信任 / 人情味层 / 遗忘曲线；当前 v2.8.3）
+ 覆盖：last_recalled 戳时间 / source 标签 + pending / 情感 schema / 检索源排序 /
+       双向遗忘 forget / 双源合并迁移（冲突以文件为准 + 字段校验）。
+ 运行：python3 test_dual_source.py
+diff --git "a/\347\273\264\346\212\244\346\214\207\345\215\227.md" "b/\347\273\264\346\212\244\346\214\207\345\215\227.md"
+new file mode 100644
+index 0000000..050feb3
+--- /dev/null
++++ "b/\347\273\264\346\212\244\346\214\207\345\215\227.md"
+@@ -0,0 +1,122 @@
++# memory-trigger 人肉使用指南（维护工具篇）
++
++> 给**人类操作员**看：怎么手动保养你的记忆库，别让它退化成普通追加文件。
++> AI 用的一份见仓库 README「⚠️ 让 AI 主动记」整段（直接粘进 bot 的 SOUL），同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
++
++---
++
++## 0. 一句话定位
++
++memory-trigger 不是"往文件里 append"那么简单——它是带**遗忘曲线、权重排序、核心钉死、双源信任、崩溃恢复**的结构化长期记忆。
++但这些智能**只在使用对应工具时才生效**。如果只调 `write` + `search`，它就等于一个带去重的普通记忆文件，其余 9 个工具全在吃灰。
++
++所以：**维护工具要定期跑，最好排定时任务自动跑。**
++
++---
++
++## 1. 工具全景（11 个 MCP 工具）
++
++| 工具 | 类别 | 一句话 |
++|---|---|---|
++| `memory_write` | 日常 | 写入/更新一条记忆（upsert，按 entity+kind 去重） |
++| `memory_search` | 日常 | 关键词检索；命中即触发遗忘衰减 |
++| `memory_forget` | 日常 | 双向遗忘（标 superseded + 让 AI 也放下） |
++| `memory_wellness` | 日常 | 记录心情/睡眠体检 |
++| `memory_decay` | **每周** | 梦境周期：全库非 core 记忆统一遗忘衰减 |
++| `memory_vacuum` | **每周** | 归档 >90 天前 superseded 的旧记忆，主库瘦身 |
++| `memory_stats` | **每周** | 体检：核心数/均权重/最弱5/最久未提 |
++| `memory_selfcheck` | **每周** | 扫缺 entity 的旧脏记录并自愈 |
++| `memory_backup` | **每周/大改前** | 备份 memory.json / entity_index.json |
++| `memory_recover` | 异常 | 崩溃后从 WAL 重放未提交项 |
++| `memory_init` | 部署 | 首次建库 |
++
++日常 4 个由 AI 在对话中自然调用；**每周 5 个（decay/vacuum/stats/selfcheck/backup）必须由定时任务自动跑**，AI 不该每次对话手动调。
++
++---
++
++## 2. 九个维护工具逐个说
++
++### `memory_decay` —— 梦境周期 / 遗忘曲线
++- **作用**：对所有 `active` 且非 `core` 的记忆，统一执行 `importance *= 0.995 ** 距上次召回天数`（半衰期≈138 天）。常聊的话题因 `search` 不断重置 `last_recalled` 而稳在高位；冷掉的话题自然下沉。
++- **何时用**：**每周一次**（建议排定时任务）。不要等用户提醒——不跑，记忆就永不淡。
++- **CLI**：`python write_pipeline.py decay <REFS_DIR>`
++- **注意**：只降权重、不删记忆；`core=true` 的记忆永不衰减。
++
++### `memory_vacuum` —— 归档瘦身
++- **作用**：把 `>90` 天前被标 `superseded`（已遗忘/过期）的记忆移到 `.archive/memory_YYYYMMDD.json`，主库只留活跃记忆。
++- **何时用**：**每周一次**，紧跟 decay 之后。
++- **CLI**：`python write_pipeline.py vacuum <REFS_DIR>`
++
++### `memory_stats` —— 健康体检
++- **作用**：返回 `core_memories`（核心数）、`avg_importance_noncore`（非核平均权重）、`weakest_active`（最弱 5 条）、`most_stale_active`（最久未召回 5 条）、各类计数。
++- **何时用**：**每周一次**，结果应推给主人看（如 Bark 周报）。想知道"TA 现在记得多少"随时也能手动跑。
++- **CLI**：`python write_pipeline.py stats <REFS_DIR>`
++
++### `memory_selfcheck` —— 脏数据自愈
++- **作用**：扫描早期手写入库、缺 `entity` 字段的旧记录，按内容首行派生实体名自动补全。
++- **何时用**：并入**每周维护**顺手跑；或发现检索异常时手动跑。
++- **CLI**：`python write_pipeline.py selfcheck <REFS_DIR>`
++
++### `memory_backup` —— 备份
++- **作用**：把 `memory.json` / `entity_index.json` 复制到 `.backup/`（保留最近 10 组，按微秒时间戳避免同秒覆盖）。
++- **何时用**：**每周维护开头**兜底一份；大改记忆库前也先跑。正常写入已自动 write-through 备份，这步是双保险。
++- **CLI**：`python write_pipeline.py backup <REFS_DIR>`
++
++### `memory_forget` —— 双向遗忘
++- **作用**：把记忆标 `superseded`，并写 `.suppressed.json` + 生成 `suppressed_prompt.md`，让 AI 自身也"放下"（不再主动提）。
++- **何时用**：用户说"别提了 / 忘了 X"时。可指定 `--kind` / `--reason`。
++- **CLI**：`python write_pipeline.py forget "<entity或id>" <REFS_DIR> --reason "用户要求"`
++
++### `memory_recover` —— 崩溃恢复
++- **作用**：从 `.wal.jsonl` 重放崩溃时未提交的 upsert/commit。
++- **何时用**：疑似写入中断、记忆"少了"时手动跑一次。
++- **CLI**：`python write_pipeline.py recover <REFS_DIR>`
++
++### `memory_wellness` —— 心情体检
++- **作用**：追加一条心情/睡眠记录到 `wellness.json`。
++- **何时用**：用户表达状态时由 AI 调；也可手动 `python write_pipeline.py wellness 开心 <REFS_DIR>`。
++
++### `memory_init` —— 建库
++- **作用**：建 `memory.json` / `aliases.json` / `wellness.json` / `.backup` / `.archive`。
++- **何时用**：仅首次部署。
++
++---
++
++## 3. 每周维护清单（手动 or 定时）
++
++按这个顺序跑一遍（脚本版见 `scripts/weekly_health_report.py`）：
++
++```
++python write_pipeline.py backup   <REFS_DIR>   # 1. 先兜底
++python write_pipeline.py decay    <REFS_DIR>   # 2. 遗忘衰减
++python write_pipeline.py vacuum   <REFS_DIR>   # 3. 归档瘦身
++python write_pipeline.py selfcheck <REFS_DIR>  # 4. 脏数据自愈
++python write_pipeline.py stats    <REFS_DIR>   # 5. 体检 -> 推周报
++```
++
++或一键：`python scripts/weekly_health_report.py --refs-dir <REFS_DIR> --bark`
++（自动跑完前 4 步 + 用 Bark 推第 5 步的周报；加 `--dry-run` 只出报告不改数据。）
++
++---
++
++## 4. 概念速查
++
++- **importance（权重）**：每条非 core 记忆的"记得牢程度"，初始 1.0，衰减只降不升。
++- **半衰期 ≈138 天**：约 138 天没被召回，权重掉到一半。
++- **core 记忆**：`core=true`（relationship/identity 默认），永不衰减、排序恒靠前。
++- **双源信任**：`file` 权威层（人 curated）vs `self` 补充层（AI 推断）；冲突时 file 赢。
++- **last_recalled**：每次 `search` 命中即刷新为"现在"——所以常搜的话题权重稳得住。
++- **.archive / .backup / .wal.jsonl / .suppressed.json**：归档 / 备份 / 写前日志 / 遗忘抑制，分别管"旧数据""安全""崩溃""AI 放下"。
++
++---
++
++## 5. 常见问题
++
++**Q：为什么我从来没看到衰减/遗忘？**
++A：因为 `decay` 从没被排成定时任务，且 `search` 内的隐藏衰减你看不到。接上每周定时任务 + 周报后就看得见曲线在动了。
++
++**Q：记忆会真的"消失"吗？**
++A：默认不会。`decay` 只降权重（排序下沉），`vacuum` 只归档 `superseded`（你主动 forget 的）。活跃记忆永不删。想要"硬忘"就显式 `forget`。
++
++**Q：refs_dir 在哪？**
++A：refs_dir 即你的记忆库目录（含 `memory.json` / `entity_index.json`）。在接入配置里通过 `MEMORY_TRIGGER_REFS_DIR` 环境变量指定，与模板代码分开保管即可。

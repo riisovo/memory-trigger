@@ -12,6 +12,11 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
 
 包含改动（相对你当前版本）
 -------------------------
+> 注：两份补丁均为 **v2.8.0 / v2.8.1 → main 完整 diff**（已排除 patches/ 自身），
+> 因此除代码外，**文档（SKILL.md / README / MEMORY_RULES.md / 维护指南 / 接入指南 /
+> SHARE.md）与新增文件（scripts/audit_memory_kit.py、scripts/weekly_health_report.py、
+> test_dual_source.py）也一并包含**——apply 后文档不再停在旧版。
+
 1. references/mcp_server.py
    - v2.8.2：entity 写入必填校验 + 首次触达自动 selfcheck 自愈 + 暴露 memory_selfcheck 工具
    - v2.8.3：权限/写入错误直白中文提示
@@ -41,6 +46,11 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
 4. references/mcp_requirements.txt（**v2.8.3 审查加固**）
    - mcp 依赖加上限 `mcp[cli]>=1.2.0,<2`，避免拉到 2.0.0（其删除了 `mcp.server.fastmcp`，
      会导致 `from mcp.server.fastmcp import FastMCP` 直接 ImportError，Server 起不来）
+5. 文档与脚本（随完整 diff 一并升级）
+   - SKILL.md：命令集补 `selfcheck`、工具数对齐 11
+   - README / MEMORY_RULES.md / 维护指南 / 接入指南 / SHARE.md：同步 v2.8.x 变更
+   - scripts/audit_memory_kit.py（16 项审计）、scripts/weekly_health_report.py（健康周报）
+   - test_dual_source.py（双源回归）
 
 如何应用
 --------

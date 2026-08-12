@@ -72,6 +72,9 @@ TZ = timezone(timedelta(hours=8))  # UTC+8
 CONFIDENCE_MIN, CONFIDENCE_MAX = 0.0, 1.0
 SLEEP_HOURS_MIN, SLEEP_HOURS_MAX = 0.0, 24.0
 
+# === v2.8.4 === wellness 心情记录条数上限（截断保留最近 N 条，防无界增长）
+WELLNESS_MAX_RECORDS = 365
+
 # === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
 ALLOWED_KINDS = {
     "preference", "event", "habit", "rule", "scene",
@@ -995,7 +998,6 @@ def cmd_stats(refs_dir):
     timestamps = sorted(_safe_str(m.get("created", "")) for m in memory if m.get("created"))
 
     # === PATCH v2.6 A3 === 最久未召回排行（last_recalled 为空退回 created）
-    now = datetime.now(TZ)
     stale = []
     for m in memory:
         if m.get("status") != "active":
@@ -1231,15 +1233,20 @@ def _regen_suppressed_prompt(refs_dir, supp):
 
 
 def cmd_init(mode, refs_dir):
+    # mode 校验放在 cmd_init 本身而非只放 CLI main()：MCP memory_init 也走本函数，
+    # 否则 MCP 传 mode="hack" 会照样写进 backend_config.json（CLI 与 MCP 行为不一致）。
+    if mode not in ("local", "graph"):
+        raise ValueError(f"未知 mode: {mode!r}（仅支持 local / graph）")
     os.makedirs(refs_dir, exist_ok=True)
     os.makedirs(os.path.join(refs_dir, ".backup"), exist_ok=True)
     os.makedirs(os.path.join(refs_dir, ".archive"), exist_ok=True)
 
     backend_path = os.path.join(refs_dir, "backend_config.json")
     if not os.path.exists(backend_path):
+        backend_info = "纯本地文件模式" if mode == "local" else "本地文件 + graph 镜像"
         safe_write_json(backend_path, {
             "mode": mode,
-            "backend_info": "纯本地文件模式"
+            "backend_info": backend_info
         })
 
     mem_path = os.path.join(refs_dir, "memory.json")
@@ -1432,6 +1439,10 @@ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
         if not isinstance(data.get("records"), list):
             data["records"] = []
         data["records"].append(entry)
+        # === v2.8.4 === 记录上限：只保留最近 WELLNESS_MAX_RECORDS 条，防止天长日久无界增长。
+        # 按 date 升序截断（写入顺序本就近似有序，直接取尾部最稳）。新写入必被保留。
+        if len(data["records"]) > WELLNESS_MAX_RECORDS:
+            data["records"] = data["records"][-WELLNESS_MAX_RECORDS:]
         safe_write_json(well_path, data)
     finally:
         file_unlock(fd, refs_dir)

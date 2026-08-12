@@ -56,14 +56,16 @@ _print_lock = threading.Lock()
 _selfchecked: set = set()
 
 
-def _resolve_refs(refs_dir: str | None) -> str:
+def _resolve_refs(refs_dir: str | None, skip_selfcheck: bool = False) -> str:
     if refs_dir:
         resolved = refs_dir
     else:
         env = os.environ.get("MEMORY_TRIGGER_REFS_DIR")
         resolved = env if env else _HERE
     # 首次触达该目录即自愈，后续调用跳过；任何异常都不影响工具本身
-    if resolved not in _selfchecked:
+    # skip_selfcheck=True 用于显式调 memory_selfcheck 时：让该工具自己跑唯一一次扫描，
+    # 否则 _resolve_refs 先自愈一遍、工具再扫一遍，返回的摘要恒是"0 修复"，把真实修复吞掉。
+    if not skip_selfcheck and resolved not in _selfchecked:
         _selfchecked.add(resolved)
         try:
             wp.cmd_selfcheck(resolved)
@@ -175,7 +177,7 @@ def memory_backup(refs_dir: str = "") -> str:
 @mcp.tool()
 def memory_selfcheck(refs_dir: str = "") -> str:
     """自检并修复记忆库：扫描缺 entity 的旧记录（早期手写入库遗留），自动补全并打日志，返回修复摘要。★ 可并入【每周定时维护】第 4 步顺手跑。"""
-    return json.dumps(_call(wp.cmd_selfcheck, _resolve_refs(refs_dir)), ensure_ascii=False)
+    return json.dumps(_call(wp.cmd_selfcheck, _resolve_refs(refs_dir, skip_selfcheck=True)), ensure_ascii=False)
 
 
 @mcp.tool()

@@ -37,7 +37,7 @@ python3 references/write_pipeline.py decay references/        # 梦境周期：�
 python3 references/write_pipeline.py forget "读书" references/
 ```
 
-命令集：`write` / `search` / `forget` / `stats` / `decay` / `vacuum` / `backup` / `recover` / `wellness` / `init`。
+命令集：`write` / `search` / `forget` / `stats` / `decay` / `vacuum` / `backup` / `selfcheck` / `recover` / `wellness` / `init`。
 
 ## 2. 数据模型
 
