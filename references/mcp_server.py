@@ -224,8 +224,7 @@ def memory_expire_check(refs_dir: str = "") -> str:
 
 @mcp.tool()
 def memory_recall(refs_dir: str = "", limit: int = 3) -> str:
-    """★v2.9 主动回忆★ 不再被动等检索——直接挑出『此刻值得想起的』几条旧记忆（核心优先 + 从未被提起 + 带情感锚点 + 快到期加分），
-    返回含 context/emotion_tags，方便带着温度提起（『我想起你当时说……』）。聊天冷场、纪念日、想关心 TA 时主动调它。"""
+    """★v2.9 主动回忆★ 不再被动等检索——直接挑出『此刻值得想起的』几条旧记忆。双通道：常聊/核心按记得牢程度排；冷掉的旧事（从没提过/很久没召回）走『旧事重提』通道，不看衰减后权重、改看从没提过+带当时的气氛+当初记得牢。返回含 context/emotion_tags 与 recall_reason，方便带着温度提起（『我想起你当时……』）。聊天冷场、纪念日、想关心 TA 时主动调它。"""
     return json.dumps(_call(wp.cmd_recall, _resolve_refs(refs_dir), max(1, min(10, limit))), ensure_ascii=False)
 
 
