@@ -149,14 +149,14 @@ pip install -r references/mcp_requirements.txt     # 或：uv pip install -r ref
 
 ### 暴露的工具与 Prompt
 
-- **10 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_recover` / `memory_wellness` / `memory_init` —— 一一对应本地层命令，双源信任 / 人情味层逻辑完全复用。
+- **11 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 一一对应本地层命令（含 `selfcheck` 自检），双源信任 / 人情味层逻辑完全复用。
 - **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，就等于把「主动记」的意识种进去——省去手抄那段话。
 
 > ⚠️ 关键提醒（与上方「让 AI 主动记」同义）：**MCP 只负责把工具递到 AI 手边，不制造「主动调用」的意识。** 务必让 AI 读 `remember_guidance` 或把那段指令写进 SOUL，否则再聪明的模型也只会在你下令时才记。工具箱打开 ≠ AI 自己会开箱。
 
 ### 端到端验证（可选）
 
-部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 10 工具 + 1 Prompt + 双源信任闭环：
+部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 11 工具 + 1 Prompt + 双源信任闭环：
 
 ```bash
 cd references && python3 verify_mcp_stdio.py

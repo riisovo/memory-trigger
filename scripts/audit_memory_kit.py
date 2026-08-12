@@ -194,7 +194,7 @@ def main():
     print("\n--- 7. install.sh 自检覆盖 ---")
     if os.path.isfile(install_sh):
         sh = open(install_sh, encoding="utf-8").read()
-        check("install.sh 跑 v2.6 双源自检 test_dual_source.py",
+        check("install.sh 跑 v2.8 双源自检 test_dual_source.py",
               'test_dual_source.py' in sh, level="WARN",
               detail="install.sh 未跑双源自检 test_dual_source.py，v2.6 逻辑装完不验" if 'test_dual_source.py' not in sh else "")
     else:

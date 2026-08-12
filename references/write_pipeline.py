@@ -1470,6 +1470,8 @@ def main():
             cmd_vacuum(refs_dir)
         elif cmd == "backup":
             cmd_backup(refs_dir)
+        elif cmd == "selfcheck":
+            print(json.dumps(cmd_selfcheck(refs_dir), ensure_ascii=False))
         elif cmd == "recover":
             cmd_recover(refs_dir)
         elif cmd == "wellness":

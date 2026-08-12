@@ -8,7 +8,7 @@
     python3 references/verify_mcp_stdio.py
 
 它会真实拉起 server 子进程、通过 stdio 传输调用工具，验证：
-  - 10 个 MCP 工具 + 1 个 Prompt 注册齐全
+  - 11 个 MCP 工具 + 1 个 Prompt 注册齐全
   - 双源信任：user_explicit 直接落盘 core 钉死；self_inferred 低置信挂 pending 不进检索
   - 双向遗忘：forget 后检索归零
 """

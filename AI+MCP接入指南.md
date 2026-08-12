@@ -99,7 +99,7 @@ cd references && python3 verify_mcp_stdio.py
 # 或指定解释器：MT_PYTHON=/你的python路径 python3 verify_mcp_stdio.py
 ```
 
-它会真拉起 server 子进程、走完整 stdio 握手，验证 10 个工具 + 1 个 Prompt + 双源信任闭环。
+它会真拉起 server 子进程、走完整 stdio 握手，验证 11 个工具 + 1 个 Prompt + 双源信任闭环。
 
 ---
 
@@ -112,9 +112,9 @@ cd references && python3 verify_mcp_stdio.py
 
 ---
 
-## 接上后 AI 能调的 10 个工具
+## 接上后 AI 能调的 11 个工具
 
-`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_recover` / `memory_wellness` / `memory_init` —— 具体行为见 SKILL.md。
+`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 具体行为见 SKILL.md。
 
 ---
 
