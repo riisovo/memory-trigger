@@ -1350,14 +1350,19 @@ def cmd_expire_check(refs_dir):
 def cmd_recall(refs_dir, limit=3):
     """=== PATCH v2.9 (主动回忆触发器) === 从记忆库里挑出"值得此刻想起的"几条。
 
-    不再被动等检索——给 AI 一个"主动翻旧账"的抓手。评分 = effective_importance（核心优先）
-    + 从未被提起过 + 带情感锚点 + 快到期（到期前最后提醒一次）。返回条目含 context /
-    emotion_tags，方便 AI 有温度地提起（"我想起你当时说……"）。"""
+    双通道设计（修复"被遗忘的反而排不上号"的矛盾）：
+      · 温热通道 —— 常提/核心记忆，按 effective_importance 排（保持"常聊的记得牢"）。
+      · 旧事重提通道 —— 冷掉的记忆（从没提起过 / 很久没召回）单独捞，评分不看衰减后的
+        importance，而看【从没提过 + 带当时的气氛 + 快到期 + 曾经很重要】——
+        否则衰减越狠排越后，"最该被想起的旧事"永远被遗忘曲线压死。
+    输出按通道混合，带 recall_reason 说明为什么此刻提起这条。"""
     mem_path = os.path.join(refs_dir, "memory.json")
     memory = read_json_typed(mem_path, list, refs_dir, "memory")
     now = datetime.now(TZ)
+    COLD_DAYS = 90  # 距上次召回超过此天数 → 视为"冷掉的旧事"
 
-    scored = []
+    warm = []
+    cold = []
     for e in memory:
         if not isinstance(e, dict):
             continue
@@ -1374,12 +1379,16 @@ def cmd_recall(refs_dir, limit=3):
                     expiring = True
             except (ValueError, TypeError):
                 pass
-        score = imp + (RECALL_BONUS_NEVER if never else 0) \
-            + (RECALL_BONUS_EMOTION if has_emotion else 0) \
-            + (RECALL_BONUS_EXPIRING if expiring else 0)
-        scored.append({
-            "score": round(score, 4),
-            "importance": round(imp, 4),
+        # 冷热度：core 恒温；其余按距上次召回天数
+        cold_days = 0
+        if not _is_core(e):
+            ref = e.get("last_recalled") or e.get("created")
+            if ref and isinstance(ref, str):
+                try:
+                    cold_days = max(0.0, (now - ts_parse(ref)).total_seconds() / 86400.0)
+                except (ValueError, TypeError):
+                    cold_days = 0
+        item = {
             "id": e.get("id"),
             "entity": e.get("entity"),
             "kind": e.get("kind"),
@@ -1389,13 +1398,45 @@ def cmd_recall(refs_dir, limit=3):
             "never_recalled": never,
             "expires_at": e.get("expires_at"),
             "last_recalled": e.get("last_recalled"),
-        })
+            "importance": round(imp, 4),
+            "cold_days": round(cold_days, 1),
+        }
+        if _is_core(e) or cold_days < COLD_DAYS:
+            item["score"] = round(imp, 4)  # 温热：按记得牢程度
+            item["recall_reason"] = "常聊的，正在心头"
+            warm.append(item)
+        else:
+            # 旧事重提：衰减后的 importance 不作主键，改看"值不值得捞回来"
+            score = (RECALL_BONUS_NEVER if never else 0) \
+                + (RECALL_BONUS_EMOTION if has_emotion else 0) \
+                + (RECALL_BONUS_EXPIRING if expiring else 0) \
+                + (0.25 * max(0.0, min(1.0, _safe_float(e.get("confidence", 1.0), 1.0))))
+            item["score"] = round(score, 4)
+            if never:
+                item["recall_reason"] = "从没跟你提起过的旧事"
+            elif expiring:
+                item["recall_reason"] = "快到期了，最后想起一次"
+            elif has_emotion:
+                item["recall_reason"] = "想起来都带着当时的气氛"
+            else:
+                item["recall_reason"] = "很久没提起的旧事"
+            cold.append(item)
 
-    scored.sort(key=lambda x: -x["score"])
+    warm.sort(key=lambda x: -x["score"])
+    cold.sort(key=lambda x: -x["score"])
+    # 混合：温热至多 1 条（保持"常聊的稳"，但不让它霸占全部），其余名额留给旧事重提
+    results = []
+    if warm:
+        results.append(warm[0])
+    results += cold[: max(0, limit - len(results))]
+    if len(results) < limit:
+        results += warm[1: limit - len(results)]
+
     print(json.dumps({
         "status": "recalled",
-        "count": len(scored),
-        "results": scored[:limit],
+        "count": len(results),
+        "channel": {"warm": len(warm), "old_treasure": len(cold)},
+        "results": results,
     }, ensure_ascii=False, indent=2))
 
 
