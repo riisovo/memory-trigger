@@ -73,7 +73,7 @@ python3 references/write_pipeline.py forget "读书" references/
 
 ### 3.3 status 状态机
 
-`"status": "active|pending|superseded"`（记忆层）；实体层另有 `confirmed|pending`。
+`"status": "active|pending|superseded"`（记忆层）。实体索引（`entity_index.json`）的每实体只记 `confirmed`（已沉淀），写路径从不写 pending——故无实体层 pending 状态。
 
 - `active`：生效，`search` 只返回这一档（`pending`/`superseded` 不泄漏）。
 - `pending`：待确认（多为低置信自推断）。
@@ -84,7 +84,7 @@ python3 references/write_pipeline.py forget "读书" references/
 让 agent 的记忆不像冷冰冰的数据库，而像真人——重要的钉死，久不提的慢慢淡。
 
 - **核心记忆钉死 `core`**：`relationship` / `identity` 这两类默认就是核心记忆（`core=true`），代表「我们是谁」的基石，**永不衰减**（比如「我们是恋人」「我是谁」不会因为久不提就消失）。写其他类型时可用 `--core true|false` 显式覆盖（例如把一条特别重要的约定钉成核心）。
-- **遗忘曲线 `importance`**：每条非核心记忆带 `importance`（初始 1.0）。每次被 `search` 命中，按 `importance *= 0.995 ** 天_距_上次_召回` 衰减（半衰期≈138 天，慢忘）；常聊的话题被反复唤起、权重稳得住，冷掉的话题自然淡化。`core` 记忆不参与衰减。
+- **遗忘曲线 `importance`**：每条非核心记忆带 `importance`（初始 1.0）。每次被 `search` 命中，按 `importance *= 0.995 ** 天_距_上次_召回` 衰减（半衰期≈138 天，慢忘）；常聊的话题因「距上次召回」天数小、衰减很慢、长期稳在高位，冷掉的话题自然淡化——但注意：**importance 是单调递减的，召回只重置计时、不加分**，连续 138 天完全不提仍会减半。`core` 记忆不参与衰减。
 - **梦境周期 `decay` 命令**：可定期（如每周巡检）跑一次 `decay`，对全库久不提的非核心记忆统一衰减，模拟「睡一觉、淡掉的更淡」。
 - `stats` 会报告核心记忆数、非核心平均权重、最弱记忆排行，便于观察记忆的健康度。
 

@@ -75,9 +75,6 @@ def safe_read_json(path):
 def normalize_entity(entity, aliases):
     if entity in aliases:
         return aliases[entity]
-    for std in aliases.keys():
-        if len(std) >= 2 and std != entity and std in entity:
-            return std
     return entity
 
 

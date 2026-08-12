@@ -15,6 +15,8 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
 1. references/mcp_server.py
    - v2.8.2：entity 写入必填校验 + 首次触达自动 selfcheck 自愈 + 暴露 memory_selfcheck 工具
    - v2.8.3：权限/写入错误直白中文提示
+   - **v2.8.3 审查加固**：`_call` 不再只捕获 stdout，会透出只读体检函数（memory_selfcheck）
+     的 return 摘要，否则该工具永远只回 `{"status":"ok"}` 把修复明细吞掉
 2. references/write_pipeline.py（核心加固）
    - 数据安全(P0)：损坏文件隔离+从备份恢复、WAL upsert 幂等去重(根治无限重放)、
      recover 不再破坏他进程 flock 互斥、search 锁内读改写、备份 write-through(零丢失)、
@@ -23,6 +25,22 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
      锁损坏回退 TimeoutError 而非 UnboundLocalError、wellness 数值校验
    - 语义精确(P2)：空/纯空格 entity 拒绝、normalize_entity 不再子串吞并、search 不改写查询词
      /不倒库、forget 清理 suppressed 状态、confidence 越界拒绝
+   - **v2.8.3 审查加固**：
+     · recover 重放后截断 WAL（只留失败行），根治 WAL 无限增长（1→3→5→7…）
+     · `init <mode> <新路径>` 显式取第二个参数为 refs_dir 并自动建库，mode 必填且只接受
+       local/graph（此前路径不存在时回扫识别不到、直接用脚本目录初始化，等于没建对库）
+     · cmd_wellness 整个 read-modify-write 包进文件锁，并发写心情不再互相覆盖丢记录
+     · cmd_search 把 `_touch_recalled` 落盘的衰减/戳记结果回填进输出，返回的 entry 不再
+       是"触碰前"的快照（last_recalled 恒 null / importance 未衰减）
+     · safe_write_json 改 os.replace，Windows 上目标已存在也能原子覆盖（os.rename 会抛
+       FileExistsError）
+     · 原子回滚改回 mtime 排序（与 _backup_candidates 一致），不再用文件名排序导致回错快照
+3. references/merge_migrate.py（**v2.8.3 审查加固**）
+   - normalize_entity 去掉子串吞并分支：别名只做精确匹配，避免长实体名被短别名误吞
+     （如「任务乙」不会被「乙」这种子串别名错误合并）
+4. references/mcp_requirements.txt（**v2.8.3 审查加固**）
+   - mcp 依赖加上限 `mcp[cli]>=1.2.0,<2`，避免拉到 2.0.0（其删除了 `mcp.server.fastmcp`，
+     会导致 `from mcp.server.fastmcp import FastMCP` 直接 ImportError，Server 起不来）
 
 如何应用
 --------
@@ -40,7 +58,10 @@ memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三
 - 极限压测 5 轮共 182 例：修复后 182/182 PASS，0 BUG。
 - 反向对照：同一套 182 例打在修复前 v2.8.1 上 → 29 BUG（证明压测确实能抓真 bug，非假绿）。
 - 原有单测：test_dual_source 20/20 + references/test_dual_source 27/27 全过。
-- MCP stdio 端到端：11 个工具 + 完整写入/检索/遗忘生命周期正常。
+- 18 项审查加固专项复现（#1–#11 代码侧）：15/15 PASS（selfcheck 摘要透出、WAL 截断、
+  init 新路径建库、wellness 并发不丢、search 触碰回填、os.replace 等）。
+- MCP stdio 端到端：11 个工具 + 完整写入/检索/遗忘生命周期正常（含 memory_selfcheck 透出摘要）。
+- 两份补丁均在全新 v2.8.0 / v2.8.1 检出版本上 `git apply --check` 干净通过。
 
 注意
 ----

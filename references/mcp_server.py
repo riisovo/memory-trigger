@@ -83,16 +83,22 @@ def _call(fn, *args, **kwargs) -> dict:
     try:
         with _print_lock, contextlib.redirect_stdout(buf):
             try:
-                fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except SystemExit:
-                pass
+                result = None
         raw = buf.getvalue().strip()
-        if not raw:
-            return {"status": "ok"}
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"raw": raw}
+        if raw:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"raw": raw}
+        # === 修复 (finding #2) === cmd_selfcheck 等只读体检函数不 print JSON，
+        # 而是直接 return 摘要 dict；此前 _call 只捕获 stdout，导致 memory_selfcheck
+        # 永远只回 {"status":"ok"}，把真正的修复摘要吞掉。这里在无打印输出时
+        # 回退到函数的返回值，让体检摘要能被 MCP 工具正常透出。
+        if result is not None:
+            return result
+        return {"status": "ok"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

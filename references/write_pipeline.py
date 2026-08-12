@@ -232,7 +232,10 @@ def safe_write_json(path, data):
         with open(tmp_path, "w", encoding="utf-8") as f:
             # allow_nan=False：最后一道防线，宁可写失败也不产出非法 JSON（裸 NaN/Infinity）
             json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
-        os.rename(tmp_path, path)
+        # os.replace 跨平台原子替换：Windows 上目标已存在时 os.rename 会抛
+        # FileExistsError，导致每次改写已有文件都失败；os.replace 在 POSIX/Windows
+        # 均覆盖式替换（见 #11）。
+        os.replace(tmp_path, path)
     except PermissionError as e:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -308,6 +311,39 @@ def wal_append(refs_dir, entry):
         raise PermissionError(
             f"无写权限：无法追加 WAL {path}（记忆库目录 {refs_dir} 当前进程不可写）。原错误：{e}"
         )
+
+def _wal_prune(refs_dir, keep):
+    """=== 修复 (finding #3) === WAL 重放后就地截断，只保留 keep（重放失败）的条目，
+    其余清空，彻底阻断 WAL 的无限增长。
+
+    此前 cmd_recover 只重放未提交行、从不截断 .wal.jsonl：每跑一次磁盘里就多攒一批
+    upsert+commit 行（实测 1→3→5→7… 只增不减）。虽然已落盘的 memory_id 会被跳过不
+    重放，但 WAL 文件本身永不缩小，长期运行等同于缓慢泄漏磁盘。
+
+    注意：重放时 cmd_write 会向 WAL 追加它自己的新 upsert+commit，这些代表**已成功
+    落盘**的记录，不需要再被恢复——截断时一并清除是正确行为。整个重写在文件锁内完成，
+    避免与并发写入竞争。
+    """
+    path = os.path.join(refs_dir, ".wal.jsonl")
+    fd = file_lock(refs_dir)
+    try:
+        lines = []
+        for e in keep:
+            if isinstance(e, dict):
+                try:
+                    lines.append(json.dumps(e, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    continue
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(ln + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        file_unlock(fd, refs_dir)
+
 
 def _backup_candidates(bkp_dir, stem):
     """该 stem 的备份快照路径列表，从新到旧。
@@ -623,6 +659,8 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "source": source,
             "confidence": confidence,
             "emotion_tags": emotion_tags or [],
+            "core": core,
+            "reason": reason,
             "memory_id": new_id,
             "targets": targets
         })
@@ -686,10 +724,12 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
         if not consistent:
             bkp_dir = os.path.join(refs_dir, ".backup")
-            bkps = sorted(os.listdir(bkp_dir), reverse=True)
-            if bkps:
-                latest = bkps[0]
-                ts_clean = latest.split("_", 1)[-1].rsplit(".", 1)[0]
+            # === v2.8.4 === 回滚取最新备份改用 mtime 排序（与 v2.8.3 _backup_candidates 一致），
+            # 不再用文件名排序（微秒/时区两种时间戳混排会错判新旧，'+' < '-'）。
+            cands = _backup_candidates(bkp_dir, "memory")
+            if cands:
+                latest = cands[0]
+                ts_clean = os.path.basename(latest).split("_", 1)[-1].rsplit(".", 1)[0]
                 for fname in ("entity_index", "memory"):
                     pat = f"{fname}_{ts_clean}.json"
                     bkp_path = os.path.join(bkp_dir, pat)
@@ -745,11 +785,18 @@ def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
     此前 search 在锁外读盘、改内存、再整体写回，与并发的 write 相互覆盖：
     write 刚落盘的新记录会被 search 手里的旧快照抹掉。实测 3 写 + 3 搜并发，
     期望 29 条只剩 16 条，**丢失 45%**。加锁后读到的一定是最新快照。
+
+    === 修复 (finding #10) === 返回 {id: {"importance":..., "last_recalled":...}} 的
+    逐条更新，供 cmd_search 把衰减/戳记结果回填到自己的输出里。此前 search 在调用
+    _touch_recalled *之前* 就把 entry 快照拼好，_touch_recalled 改的是磁盘上的另一份
+    副本，导致返回给调用方的 entry 永远是"触碰前"的快照（last_recalled 恒为 null、
+    importance 未衰减）——即真正发生了召回，结果却说没发生。
     """
     if not hit_ids:
-        return
+        return {}
     now = now or datetime.now(TZ)
     hit = set(hit_ids)
+    updates = {}
     fd = file_lock(refs_dir)
     try:
         memory = read_json_typed(mem_path, list, refs_dir, "memory")
@@ -763,11 +810,17 @@ def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
                     cur = _safe_float(e.get("importance", 1.0), 1.0)
                     e["importance"] = round(cur * (DECAY_FACTOR ** days), 6)
                 e["last_recalled"] = now.isoformat(timespec="seconds")
+                # 同一 id 在多源检索里可能出现多次，统一以磁盘最终态为准
+                updates[e["id"]] = {
+                    "importance": e["importance"],
+                    "last_recalled": e["last_recalled"],
+                }
                 changed = True
         if changed:
             safe_write_json(mem_path, memory)
     finally:
         file_unlock(fd, refs_dir)
+    return updates
 
 
 def cmd_search(query, refs_dir):
@@ -845,16 +898,23 @@ def cmd_search(query, refs_dir):
 
     # === PATCH v2.6 A1 + v2.7 C2 === 命中即戳 last_recalled + 衰减
     hit_ids = [r["entry"].get("id") for r in results if r["entry"].get("id")]
-    _touch_recalled(refs_dir, mem_path, hit_ids, now)
+    touch_updates = _touch_recalled(refs_dir, mem_path, hit_ids, now)
 
     out = []
     for r in results[:5]:
         e = dict(r["entry"])
+        # === 修复 (finding #10) === 把磁盘上已落定的衰减/戳记结果回填进输出，
+        # 否则调用方拿到的永远是"触碰前"的快照（last_recalled=null、importance 未衰减）。
+        uid = e.get("id")
+        if uid in touch_updates:
+            e["last_recalled"] = touch_updates[uid]["last_recalled"]
+            e["importance"] = touch_updates[uid]["importance"]
         e["_authority"] = r["authority"]
         e["_supplement"] = r["supplement"]
         e["_match_source"] = r["source"]
-        e["_importance"] = round(r["_eff_imp"], 4)
-        e["_core"] = _is_core(r["entry"])
+        # _importance 以回填后的值重算，保证与 entry 内 importance 一致（衰减后更低）
+        e["_importance"] = round(effective_importance(e, now), 4)
+        e["_core"] = _is_core(e)
         out.append(e)
 
     print(json.dumps({
@@ -1232,6 +1292,9 @@ def cmd_recover(refs_dir):
         lines = [l.strip() for l in f if l.strip()]
 
     if not lines:
+        # === 修复 (finding #3) === 即便 WAL 文件存在但无内容，也清空它，
+        # 避免残留空行不断累积。
+        _wal_prune(refs_dir, keep=[])
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "empty_wal"}))
         return
 
@@ -1276,6 +1339,11 @@ def cmd_recover(refs_dir):
 
     uncommitted = list(uncommitted_map.values())
     if not uncommitted:
+        # === 修复 (finding #3) === 关键：正常路径下每次 cmd_write 都会向 WAL 追加
+        # 一对 upsert+commit，但内存已落盘、WAL 永不自动清。recover 跑起来发现"全部已
+        # 提交"就直接返回，等于放任 WAL 无限膨胀（实测每跑一次 1→3→5→7…）。这里必须
+        # 把 WAL 整体清空——它们都已安全持久化，没有保留价值。
+        _wal_prune(refs_dir, keep=[])
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "all_committed"}))
         return
 
@@ -1285,6 +1353,7 @@ def cmd_recover(refs_dir):
     # 真正的死锁场景已由 file_lock 内的「持有者进程不存在 → truncate 复用同 inode」处理。
 
     recovered = []
+    failed = []
     for e in uncommitted:
         ent_name = e.get("entity")
         try:
@@ -1301,15 +1370,23 @@ def cmd_recover(refs_dir):
                 source=e.get("source", "auto_detect"),
                 confidence=_safe_float(e.get("confidence", 1.0), 1.0),
                 emotion_tags=e.get("emotion_tags"),
+                core=e.get("core"),
+                reason=e.get("reason"),
             )
             recovered.append(ent_name)
         except Exception as ex:
             sys.stderr.write(f"[memory_recover] recover failed for {ent_name!r}: {ex}\n")
+            failed.append(e)
+
+    # === 修复 (finding #3) === 重放完成后截断 WAL：只保留重放失败的行，
+    # 已成功落盘的记录一律清除，避免 WAL 文件无限增长（1→3→5→7…）。
+    _wal_prune(refs_dir, keep=failed)
 
     print(json.dumps({
         "status": "recovered" if recovered else "partial",
         "recovered_count": len(recovered),
         "recovered_entities": recovered,
+        "failed_count": len(failed),
         "total_uncommitted": len(uncommitted)
     }, ensure_ascii=False))
 
@@ -1317,12 +1394,6 @@ def cmd_recover(refs_dir):
 def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
     today = datetime.now(TZ).date().isoformat()   # === PATCH v2.6 A2 === 统一用 TZ
     well_path = os.path.join(refs_dir, "wellness.json")
-    # === PATCH v2.8.3 (3.3c) === 改走 read_json_typed。此前直接 json.load，
-    # wellness.json 一旦损坏就抛 JSONDecodeError，连"记一下今天心情"都做不了。
-    data = read_json_typed(well_path, dict, refs_dir, "wellness")
-    if not isinstance(data.get("records"), list):
-        data["records"] = []
-
     entry = {
         "date": today,
         "mood": _safe_str(mood),
@@ -1349,8 +1420,21 @@ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
     if note and note != "-":
         entry["note"] = _safe_str(note)
 
-    data["records"].append(entry)
-    safe_write_json(well_path, data)
+    # === 修复 (finding #8) === 整个 read-modify-write 必须在同一把文件锁内完成。
+    # 此前只给 safe_write_json 加锁，但读盘（read_json_typed）在锁外——并发写心情时
+    # 多个线程读到同一份旧快照、各自 append 一条再写回，后写的覆盖先写的，记录就丢
+    # （实测 20 并发只剩 2 条）。现在读+改+写全在锁内，串行化保证不丢。
+    fd = file_lock(refs_dir)
+    try:
+        # === PATCH v2.8.3 (3.3c) === 改走 read_json_typed。此前直接 json.load，
+        # wellness.json 一旦损坏就抛 JSONDecodeError，连"记一下今天心情"都做不了。
+        data = read_json_typed(well_path, dict, refs_dir, "wellness")
+        if not isinstance(data.get("records"), list):
+            data["records"] = []
+        data["records"].append(entry)
+        safe_write_json(well_path, data)
+    finally:
+        file_unlock(fd, refs_dir)
     print(json.dumps({"status": "ok", "date": today, "mood": mood}, ensure_ascii=False))
 
 
@@ -1487,7 +1571,16 @@ def main():
             if not args:
                 print(json.dumps({"error": "用法: init <mode> [refs_dir]  mode: local"}), file=sys.stderr)
                 sys.exit(1)
-            cmd_init(args[0], refs_dir)
+            mode = args[0]
+            # === 修复 (finding #4) === 路径显式取自第二个参数：上面的 isdir 回扫只识别
+            # "已存在"的目录，而 init 的目标路径往往尚不存在（需要先建库）。若路径已存在，
+            # 回扫已把它从 args 弹出并设好 refs_dir；若还不存在，这里用 args[1] 兜底。
+            if len(args) > 1:
+                refs_dir = os.path.abspath(args[1])
+            if mode not in ("local", "graph"):
+                print(json.dumps({"error": f"未知 mode: {mode!r}（仅支持 local / graph）"}), file=sys.stderr)
+                sys.exit(1)
+            cmd_init(mode, refs_dir)
         else:
             print(json.dumps({"error": f"未知命令: {cmd}"}), file=sys.stderr)
             sys.exit(1)

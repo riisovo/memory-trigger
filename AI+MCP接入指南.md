@@ -66,7 +66,7 @@ python -c "import mcp; print('ok')"
 首次接上后，让你的 AI 调一次 `memory_init`，或者手动跑：
 
 ```bash
-python references/write_pipeline.py init /你的记忆库路径
+python references/write_pipeline.py init local /你的记忆库路径   # 目录不存在会自动创建；mode 必须显式写（local 或 graph）
 ```
 
 会生成 `memory.json` / `aliases.json` / `wellness.json` 等文件，记忆库就建好了。

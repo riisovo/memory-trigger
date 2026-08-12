@@ -33,4 +33,4 @@ python3 references/write_pipeline.py stats references/
 
 ## 升级
 
-只换 `references/write_pipeline.py` + `SKILL.md` 即可，记忆数据 `references/memory.json` 不受影响（建议先 `backup`）。
+v2.8.x 之后改过的文件都要一起换：`references/write_pipeline.py`、`references/mcp_server.py`、`references/graph_backend.py`、`references/merge_migrate.py`、`SKILL.md`、`references/mcp_requirements.txt`（依赖加上限）。记忆数据 `memory.json` 不受影响（建议先 `backup`）。也可直接用 `patches/` 下的合并补丁本地 apply，无需逐个换文件。

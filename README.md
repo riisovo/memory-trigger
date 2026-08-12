@@ -103,7 +103,7 @@ bash install.sh
 
 ## 5 分钟上手
 
-下面用最小例子跑通「写一条 → 搜出来 → 看统计」。在模板根目录执行（记忆库以 `references/` 为例，可换成你自己的目录；首次跑 `bash install.sh` 会初始化它）。
+下面用最小例子跑通「写一条 → 搜出来 → 看统计」。在模板根目录执行（记忆库以 `references/` 为例，可换成你自己的目录；首次 `write` 会自动建库，或先跑 `init local /你的记忆库路径` 显式初始化——`install.sh` 只跑自检和测试，不会建库）。
 
 ### 命令行模式（零依赖）
 
@@ -113,7 +113,7 @@ python3 references/write_pipeline.py write "读书" preference "爱吃科幻小�
 
 # 2) 搜出来
 python3 references/write_pipeline.py search "科幻" references/
-# → 命中上面那条，并标注 authority=user_explicit
+# → 命中上面那条，并标注 _authority: "file"（source=user_explicit 属文件权威层，故 authority 为 file 而非 user_explicit）
 
 # 3) 看统计（active / pending / 核心记忆数一目了然）
 python3 references/write_pipeline.py stats references/
