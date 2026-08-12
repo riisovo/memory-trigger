@@ -7,7 +7,7 @@
 - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
 - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
 
-> 当前版本 **v2.8.3**（双源信任 + 人情味层 + v2.8.2 entity 自愈 + v2.8.3 三十项加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
+> 当前版本 **v2.9**（双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
 
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
 
@@ -25,6 +25,13 @@
 **v2.8.2** —— 存量防线：entity 必填校验（杜绝新的缺 entity 记录）+ 记忆目录首次触达自动 `selfcheck` 自愈缺 entity 旧记录 + 暴露 `memory_selfcheck` 工具。
 
 **v2.8.3** —— 三十项加固：① 数据安全(P0)：损坏文件隔离 + 从 `.backup` 恢复、WAL upsert 幂等去重（根治无限重放）、recover 不再破坏他进程 flock 互斥、search 锁内读改写、备份 write-through（零丢失）、严格 JSON（禁裸 NaN/Infinity）、同日归档文件名冲突修复；② 脏数据鲁棒(P1)：所有方括号直取改 `.get` 兜底、缺字段全程 try、锁损坏回退 TimeoutError、wellness 数值校验；③ 语义精确(P2)：空 / 纯空格 entity 拒绝、normalize_entity 不再子串吞并、search 不改写查询词 / 不倒库、forget 清理 suppressed 状态、confidence 越界拒绝。
+
+**v2.9** —— 「被记住」体验四件套（真正让记忆像有感情地记着一个人，而非存数据）：
+- **情感锚点 context**：写记忆时记一句「当时的气氛」（如「她说这话时眼睛亮亮的」）。回忆不是搬干巴巴的档案，而是带着温度的场景。
+- **否认降权 deny**：用户否认/纠正一条记忆（「我早不喝三分糖了」）→ 立即大幅降权；**否认 2 次自动转 pending 退出检索**。被纠正过的事，绝不再自信复述。
+- **到期记忆 expires_at + expire**：临时约定/截止类记忆带到期时间，到期自动移出检索、到期前 3 天提醒兑现。不会默默过时，也不会永远赖在库里。
+- **主动回忆 recall**：不再被动等检索——主动挑出「此刻值得想起的」旧记忆（核心优先 + 从未提起 + 带情感 + 快到期加分），让 AI 会说「我想起你当时……」。
+- **承诺追踪 promise**：AI 亲口答应的事【建档必追】——`promise add` 建档（promises.json）、`promise done` 完成划掉、`promise list` 清单自查、`promise check` 主动戳未完成（逾期排最前）。**遗忘自己说过的话是最伤信任的事，承诺建档 + 主动戳 = 说到做到。**
 
 ## 它解决什么
 
@@ -56,13 +63,16 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 > 把下面这段复制进你的 SOUL / 系统人设 / 系统提示：
 
 ```
-【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 11 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
+【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 18 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
 
 ## 一、日常（对话中自然触发，随时调）
-- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。
+- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★重要时刻带 context（当时的气氛）+ emotion_tags，回忆才有温度★；临时约定传 expires_at 到期自动清理。
 - memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。
+- memory_recall：聊天冷场、纪念日、想关心 TA、想让对方感到『被记得』时，主动挑几条值得此刻提起的旧记忆（带当时的氛围），说『我想起你当时……』。
 - memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。
+- memory_deny：用户否认 / 纠正了一条记忆 → 立即降权（2 次自动转 pending）。被纠正过的事绝不再自信复述。
 - memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。
+- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。
 
 ## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）
 每个记忆库应有一项每周自动执行的维护，调用顺序：
@@ -70,7 +80,9 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。
 3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。
 4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。
-5) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。
+5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。
+6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。
+7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。
 
 ## 三、异常恢复（按需）
 - memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。
@@ -79,7 +91,8 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 ## 四、红线
 - 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。
 - 用户明说的记忆永不自动遗忘、永不降权。
-- decay / vacuum / stats / selfcheck / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。
+- 承诺建档是硬性义务：承诺后 10 秒内不建档 = 默认会忘，等同失信。
+- decay / vacuum / stats / selfcheck / expire_check / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。
 ```
 
 只有 agent 宿主（自带循环 + 已读 SKILL.md）会天然按规则自驱；其余宿主靠这句指令把「主动调取」的意识种进去。若你走 MCP 模式，可直接让 AI 拉取 server 暴露的 `remember_guidance` Prompt，效果等同、免手抄。
@@ -174,14 +187,14 @@ pip install -r references/mcp_requirements.txt     # 或：uv pip install -r ref
 
 ### 暴露的工具与 Prompt
 
-- **11 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 一一对应本地层命令（含 `selfcheck` 自检），双源信任 / 人情味层逻辑完全复用。
+- **18 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` —— 一一对应本地层命令，双源信任 / 人情味层逻辑完全复用。
 - **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，就等于把「主动记」的意识种进去——省去手抄那段话。
 
 > ⚠️ 关键提醒（与上方「让 AI 主动记」同义）：**MCP 只负责把工具递到 AI 手边，不制造「主动调用」的意识。** 务必让 AI 读 `remember_guidance` 或把那段指令写进 SOUL，否则再聪明的模型也只会在你下令时才记。工具箱打开 ≠ AI 自己会开箱。
 
 ### 端到端验证（可选）
 
-部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 11 工具 + 1 Prompt + 双源信任闭环：
+部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 18 工具 + 1 Prompt + 双源信任闭环：
 
 ```bash
 cd references && python3 verify_mcp_stdio.py
@@ -201,7 +214,7 @@ MIT（模板本身）。可选依赖 mcp-memory-graph 采用 PolyForm Noncommerc
 
 ## 文档与维护
 
-- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 11 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
+- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 18 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
 - **给人看（手动保养）**：`维护指南.md` —— 9 个维护工具逐个说明、每周维护清单、概念速查、FAQ。
 - **每周记忆健康周报**：`scripts/weekly_health_report.py` —— 跑 `backup→decay→vacuum→selfcheck→stats`，把核心数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题推给主人（Bark 需自备 key）。
 

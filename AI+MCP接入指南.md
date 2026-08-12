@@ -99,7 +99,7 @@ cd references && python3 verify_mcp_stdio.py
 # 或指定解释器：MT_PYTHON=/你的python路径 python3 verify_mcp_stdio.py
 ```
 
-它会真拉起 server 子进程、走完整 stdio 握手，验证 11 个工具 + 1 个 Prompt + 双源信任闭环。
+它会真拉起 server 子进程、走完整 stdio 握手，验证 18 个工具 + 1 个 Prompt + 双源信任闭环。
 
 ---
 
@@ -112,9 +112,9 @@ cd references && python3 verify_mcp_stdio.py
 
 ---
 
-## 接上后 AI 能调的 11 个工具
+## 接上后 AI 能调的 18 个工具
 
-`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init` —— 具体行为见 SKILL.md。
+`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` —— 具体行为见 SKILL.md（v2.9 新增 `memory_recall` 主动回忆 / `memory_deny` 否认降权 / `memory_expire_check` 到期记忆 / `memory_promise*` 承诺追踪）。
 
 ---
 

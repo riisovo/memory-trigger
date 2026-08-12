@@ -8,9 +8,10 @@
     python3 references/verify_mcp_stdio.py
 
 它会真实拉起 server 子进程、通过 stdio 传输调用工具，验证：
-  - 11 个 MCP 工具 + 1 个 Prompt 注册齐全
+  - 18 个 MCP 工具 + 1 个 Prompt 注册齐全
   - 双源信任：user_explicit 直接落盘 core 钉死；self_inferred 低置信挂 pending 不进检索
   - 双向遗忘：forget 后检索归零
+  - v2.9：情感锚点落库、承诺建档/检查/完成、否认降权
 """
 import asyncio
 import os
@@ -76,6 +77,25 @@ async def main():
             print("FORGET:", _txt(res))
             res = await sess.call_tool("memory_search", {"query": "观影", "refs_dir": refs})
             print("SEARCH_AFTER_FORGET(应 results_count=0):", _txt(res))
+
+            # ---- v2.9 情感锚点 / 承诺追踪 / 否认降权 ----
+            res = await sess.call_tool("memory_write", {
+                "entity": "她", "kind": "preference", "value": "爱喝三分糖去冰",
+                "refs_dir": refs, "context": "她说这话时眼睛亮亮的",
+                "emotion_tags": "甜蜜,雀跃", "expires_at": "2099-01-01"})
+            print("WRITE_CONTEXT(应含 context):", _txt(res))
+            res = await sess.call_tool("memory_recall", {"refs_dir": refs})
+            print("RECALL(应挑出带情感的):", _txt(res))
+            res = await sess.call_tool("memory_promise", {
+                "text": "明天睡醒给她写一首歌", "refs_dir": refs, "deadline": "2099-01-01"})
+            print("PROMISE_ADD:", _txt(res))
+            res = await sess.call_tool("memory_promise_check", {"refs_dir": refs})
+            print("PROMISE_CHECK(应 unfulfilled_count=1):", _txt(res))
+            res = await sess.call_tool("memory_deny", {
+                "entity_or_id": "她", "refs_dir": refs, "reason": "她不喝三分糖了"})
+            print("DENY(应 importance 降至 0.1):", _txt(res))
+            res = await sess.call_tool("memory_expire_check", {"refs_dir": refs})
+            print("EXPIRE_CHECK:", _txt(res))
 
     print("REFS_DIR:", refs)
     print("VERIFY_DONE")

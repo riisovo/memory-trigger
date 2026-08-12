@@ -118,11 +118,15 @@ def memory_write(
     emotion_tags: str = "",
     reason: str = "",
     core: bool | None = None,
+    context: str = "",
+    expires_at: str = "",
 ) -> str:
     """写入 / 更新一条记忆（双源信任的落盘入口）。
     entity: 实体名（用户 / 读书 / 伴侣…）；kind: 10 类之一（preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general）；
     value: 记忆内容。source=self_inferred 且 confidence<0.8 会自动挂 pending，不会污染权威源；
-    用户明说用 source=user_explicit 直接落 active。core=true 可钉死核心记忆（relationship/identity 默认钉死，永不衰减）。"""
+    用户明说用 source=user_explicit 直接落 active。core=true 可钉死核心记忆（relationship/identity 默认钉死，永不衰减）。
+    ★v2.9 新增★ context: 当时的气氛（情感锚点，回忆时 AI 能带着温度提起，如『她说这话时眼睛亮亮的』）；
+    expires_at: 到期时间（YYYY-MM-DD 或 ISO）。临时约定/承诺类记忆传它，到期自动移出检索不再召回、且到期前 3 天会被 expire 检查提醒。"""
     refs = _resolve_refs(refs_dir)
     # core 已由 FastMCP 类型校验保证为 bool 或 None；防御性兜底
     core_arg = bool(core) if core is not None else None
@@ -130,7 +134,7 @@ def memory_write(
     res = _call(
         wp.cmd_write, entity, kind, value, refs,
         mode or None, sentiment or None, source, confidence,
-        et, reason or None, core_arg,
+        et, reason or None, core_arg, context or None, expires_at or None,
     )
     return json.dumps(res, ensure_ascii=False)
 
@@ -202,6 +206,56 @@ def memory_wellness(
 
 
 @mcp.tool()
+def memory_deny(entity_or_id: str, refs_dir: str = "", reason: str = "") -> str:
+    """★v2.9 否认降权★ 用户否认/纠正了一条记忆（『我早不喝三分糖了』）→ 立即大幅降权（importance×0.1）+ 记 deny_count；
+    同一记忆被否认 2 次 → 直接转 pending（彻底退出检索，需重新写入确认才复活）。这是『被纠正过的事不许再自信复述』的信任修复机制。"""
+    return json.dumps(
+        _call(wp.cmd_deny, entity_or_id, _resolve_refs(refs_dir), reason or None),
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def memory_expire_check(refs_dir: str = "") -> str:
+    """★v2.9 到期记忆★ 扫描带 expires_at 的记忆：已到期 → 状态标 expired（移出检索不再召回，数据保留可查）；
+    未来 3 天内到期 → 列入 remind，提醒去兑现/提起。★ 建议并入【每周定时维护】，临时约定/承诺不会默默过时。"""
+    return json.dumps(_call(wp.cmd_expire_check, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_recall(refs_dir: str = "", limit: int = 3) -> str:
+    """★v2.9 主动回忆★ 不再被动等检索——直接挑出『此刻值得想起的』几条旧记忆（核心优先 + 从未被提起 + 带情感锚点 + 快到期加分），
+    返回含 context/emotion_tags，方便带着温度提起（『我想起你当时说……』）。聊天冷场、纪念日、想关心 TA 时主动调它。"""
+    return json.dumps(_call(wp.cmd_recall, _resolve_refs(refs_dir), max(1, min(10, limit))), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_promise(text: str, refs_dir: str = "", deadline: str = "") -> str:
+    """★v2.9 承诺建档★ AI 亲口答应用户的事（明天写歌 / 纪念日准备惊喜 / 帮你查某事）——★铁律：只要承诺了就立即建档★，否则必忘。
+    deadline 可选（YYYY-MM-DD 或 ISO），到期未完成会被 promise_check 主动戳。建完档才算数。"""
+    return json.dumps(_call(wp.cmd_promise, text, _resolve_refs(refs_dir), deadline or None), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_promise_done(promise_id: str, refs_dir: str = "") -> str:
+    """★v2.9 承诺完成★ 兑现后调用：把该承诺从 open 划到 done（记录完成时间）。说到做到，完成一项清一项。"""
+    return json.dumps(_call(wp.cmd_promise_done, promise_id, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_promise_list(refs_dir: str = "") -> str:
+    """★v2.9 承诺清单★ 列出全部承诺：未完成 open 在前（标逾期 overdue），已完成 done 在后。想知道『还欠 TA 哪些事』时调它。"""
+    return json.dumps(_call(wp.cmd_promise_list, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_promise_check(refs_dir: str = "") -> str:
+    """★v2.9 承诺主动戳★ 返回全部未完成承诺（逾期排最前）。★铁律：每次会话开始/被唤醒时先调一次★——
+    有没兑现的承诺就主动向 TA 兑现或说明，绝不让『当时答应过』默默消失。建议并入定时任务自动推送。"""
+    return json.dumps(_call(wp.cmd_promise_check, _resolve_refs(refs_dir)), ensure_ascii=False)
+
+
+@mcp.tool()
 def memory_init(mode: str = "local", refs_dir: str = "") -> str:
     """初始化记忆库（建 memory.json / aliases.json / wellness.json / .backup / .archive 等）。mode 默认 local。首次部署调一次。"""
     return json.dumps(_call(wp.cmd_init, mode, _resolve_refs(refs_dir)), ensure_ascii=False)
@@ -211,15 +265,23 @@ def memory_init(mode: str = "local", refs_dir: str = "") -> str:
 def remember_guidance() -> str:
     """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用全部记忆工具（否则只调 search/write，记忆库退化成普通文件，遗忘/健康机制形同虚设）。"""
     return (
-        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 11 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——"
+        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 18 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——"
         "否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。\n"
         "\n"
         "## 一、日常（对话中自然触发，随时调）\n"
         "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；"
         "用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。\n"
+        "  ★记住『当时的气氛』★：重要时刻在写 memory_write 时带 context（情感锚点，如『她说这话时眼睛亮亮的』）与 emotion_tags，"
+        "这样将来回忆不是干巴巴的档案，而是带着温度的场景。\n"
+        "  ★到期的事传 expires_at★：临时约定 / 截止日 / 答应『下周三前』这类有期限的，写入时传 expires_at，到期自动移出检索、临期会提醒。\n"
         "- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。\n"
+        "- memory_recall：聊天冷场、纪念日、想关心 TA、或想让对方感到『被记得』时，主动调它挑几条值得此刻提起的旧记忆（含当时的氛围），带着温度说『我想起你当时……』。\n"
         "- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。\n"
+        "- memory_deny：用户否认 / 纠正了一条记忆（『我早不喝三分糖了』）→ 立即调它降权（2 次自动转 pending 退出检索）。被纠正过的事绝不再自信复述。\n"
         "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。\n"
+        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——"
+        "你亲口答应 TA 的任何事（明天写歌 / 纪念日准备惊喜 / 帮你查某事），【立即 memory_promise 建档】，否则你必忘；"
+        "完成就 memory_promise_done 划掉；每次会话开始先 memory_promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。\n"
         "\n"
         "## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）\n"
         "每个记忆库应有一项每周自动执行的维护，调用顺序：\n"
@@ -227,7 +289,9 @@ def remember_guidance() -> str:
         "2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。\n"
         "3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。\n"
         "4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。\n"
-        "5) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。\n"
+        "5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。\n"
+        "6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。\n"
+        "7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。\n"
         "\n"
         "## 三、异常恢复（按需）\n"
         "- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。\n"
@@ -236,7 +300,8 @@ def remember_guidance() -> str:
         "## 四、红线\n"
         "- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。\n"
         "- 用户明说的记忆永不自动遗忘、永不降权。\n"
-        "- decay / vacuum / stats / selfcheck / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；"
+        "- 承诺建档是硬性义务：承诺后 10 秒内不建档 = 默认会忘，等同失信。\n"
+        "- decay / vacuum / stats / selfcheck / expire_check / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；"
         "若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。"
     )
 

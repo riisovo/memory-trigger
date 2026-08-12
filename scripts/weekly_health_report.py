@@ -85,6 +85,17 @@ def _run_maintenance(refs_dir, dry_run):
         summary["selfcheck"] = "ok"
     except Exception as e:
         summary["selfcheck"] = f"err: {e}"
+    try:
+        ex = _cap(wp.cmd_expire_check, refs_dir)
+        summary["expired"] = len(ex.get("expired", [])) if isinstance(ex, dict) else "?"
+        summary["expire_remind"] = len(ex.get("remind", [])) if isinstance(ex, dict) else "?"
+    except Exception as e:
+        summary["expire_check"] = f"err: {e}"
+    try:
+        pc = _cap(wp.cmd_promise_check, refs_dir)
+        summary["unfulfilled_promises"] = pc.get("unfulfilled_count") if isinstance(pc, dict) else "?"
+    except Exception as e:
+        summary["promise_check"] = f"err: {e}"
     return summary
 
 
@@ -115,6 +126,9 @@ def _build_report(refs_dir, maint):
             lines.append("  · %s (%s) 已 %s 天没召回" % (ent, kind, age))
     lines.append("")
     lines.append("本周维护: %s" % json.dumps(maint, ensure_ascii=False))
+    if isinstance(maint, dict) and maint.get("unfulfilled_promises"):
+        lines.append("")
+        lines.append("⚠️ 还没兑现的承诺: %s 条（去 promise check 看明细，兑现后记得 done）" % maint["unfulfilled_promises"])
     return "\n".join(lines)
 
 

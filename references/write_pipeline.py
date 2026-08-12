@@ -42,9 +42,17 @@ write_pipeline.py —— 记忆写入管线（真实工程实现，非 LLM 散�
   write <entity> <kind> <value> [refs_dir] [--mode local]
         [--sentiment pos|neg|none|<自定义>] [--source file_import|self_inferred|user_explicit]
         [--confidence 0..1] [--emotion-tags 逗号分隔] [--reason 文本] [--core true|false]
+        [--context 当时的气氛] [--expires YYYY-MM-DD]
   search <query> [refs_dir]
   decay [refs_dir]
   forget <entity|memory_id> [refs_dir] [--reason 文本] [--kind 类型]
+  deny <entity|memory_id> [refs_dir] [--reason 文本]      # 否认降权（用户纠正过的）
+  expire [refs_dir]                                       # 到期记忆检查（到期移除/临期提醒）
+  recall [refs_dir] [--limit N]                           # 主动回忆建议（值得此刻想起的）
+  promise add <内容> [refs_dir] [--deadline YYYY-MM-DD]   # 承诺建档
+  promise done <promise_id> [refs_dir]                    # 完成划掉
+  promise list [refs_dir]                                 # 承诺清单
+  promise check [refs_dir]                                # 主动戳未完成承诺
   recover [refs_dir]
   stats [refs_dir]
   vacuum [refs_dir]
@@ -74,6 +82,18 @@ SLEEP_HOURS_MIN, SLEEP_HOURS_MAX = 0.0, 24.0
 
 # === v2.8.4 === wellness 心情记录条数上限（截断保留最近 N 条，防无界增长）
 WELLNESS_MAX_RECORDS = 365
+
+# === v2.9 人情味增强 === 到期记忆 / 否认降权 / 主动回忆 / 承诺追踪
+# 到期记忆：expires_at 到期后自动移出 active（不再被检索召回），数据保留可查
+EXPIRY_REMIND_DAYS = 3            # 到期前多少天列为"即将到期"提醒
+# 否认降权：用户否认一条记忆 → importance ×DENY_FACTOR 且记录 deny_count；
+# 累积 2 次否认 → 直接转 pending（彻底退出检索，需重新确认才复活）
+DENY_FACTOR = 0.1
+DENY_TO_PENDING_AFTER = 2
+# 主动回忆：recall 建议的评分加分（让"从未被提起 / 带情感 / 快到期"的记忆更容易被想起）
+RECALL_BONUS_NEVER = 0.15
+RECALL_BONUS_EMOTION = 0.10
+RECALL_BONUS_EXPIRING = 0.20
 
 # === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
 ALLOWED_KINDS = {
@@ -115,6 +135,20 @@ def ts_now():
 
 def ts_parse(s):
     return datetime.fromisoformat(s)
+
+def _parse_expiry(v):
+    """到期时间解析：接受 YYYY-MM-DD 或 ISO 时间，返回 UTC+8 ISO 秒级字符串；空值返回 None。
+    无法解析明确拒绝（防脏数据），避免到期记忆永远不触发。"""
+    if v is None or v == "" or v == "-":
+        return None
+    s = _safe_str(v).strip()
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return dt.isoformat(timespec="seconds")
+    except ValueError:
+        raise ValueError(f"expires_at 无法解析（应为 YYYY-MM-DD 或 ISO 时间）：{s!r}")
 
 def safe_read_json(path):
     try:
@@ -542,8 +576,9 @@ def effective_importance(entry, now):
 
 def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
               source="auto_detect", confidence=1.0, emotion_tags=None, reason=None,
-              core=None):
-    """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强）"""
+              core=None, context=None, expires_at=None):
+    """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强；
+    v2.9: context 情感锚点 + expires_at 到期时间）"""
     # === v2.8.2 增量防线：entity 必填，杜绝新的缺 entity 记录（旧数据由 cmd_selfcheck 自愈） ===
     if not entity or not str(entity).strip():
         raise ValueError("entity 必填且不能为空：记忆必须归属到具体实体（如 用户/读书/伴侣）")
@@ -641,6 +676,9 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                 # === PATCH v2.7 C1/C2 === 人情味层
                 "importance": 1.0,
                 "core": (kind in CORE_KINDS) if core is None else bool(core),
+                # === PATCH v2.9 === 情感锚点（当时的气氛）+ 到期时间
+                "context": _safe_str(context) or None,
+                "expires_at": _parse_expiry(expires_at),
             }
 
         # === PATCH v2.8.3 (P0-1) === 幂等合并会复用旧记录的 id，因此**先定稿 memory_id
@@ -664,6 +702,8 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "emotion_tags": emotion_tags or [],
             "core": core,
             "reason": reason,
+            "context": _safe_str(context) or None,   # === PATCH v2.9 ===
+            "expires_at": _parse_expiry(expires_at), # === PATCH v2.9 ===
             "memory_id": new_id,
             "targets": targets
         })
@@ -676,6 +716,10 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                 memory[similar_idx]["sentiment"] = sentiment
             if emotion_tags is not None:
                 memory[similar_idx]["emotion_tags"] = emotion_tags
+            if context is not None:
+                memory[similar_idx]["context"] = _safe_str(context) or None
+            if expires_at is not None:
+                memory[similar_idx]["expires_at"] = _parse_expiry(expires_at)
             memory[similar_idx]["source"] = source
             memory[similar_idx]["confidence"] = confidence
             if core is not None:
@@ -772,6 +816,8 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "status_field": init_status,
             "core": (kind in CORE_KINDS) if core is None else bool(core),
             "importance": 1.0,
+            "context": _safe_str(context) or None,     # === PATCH v2.9 ===
+            "expires_at": _parse_expiry(expires_at),   # === PATCH v2.9 ===
             "mode": mode,
             "targets": targets
         }, ensure_ascii=False))
@@ -1188,6 +1234,320 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
         file_unlock(fd, refs_dir)
 
 
+# ═══════════════════════════════════════════════════════════════
+# === PATCH v2.9 === 人情味增强四件套：否认降权 / 到期记忆 / 主动回忆 / 承诺追踪
+# ═══════════════════════════════════════════════════════════════
+
+def cmd_deny(entity_or_id, refs_dir, reason=None):
+    """=== PATCH v2.9 (否认降权闭环) === 用户否认一条记忆 → 立即大幅降权并记录。
+
+    这是"被记住"的信任修复机制：用户纠正过的事（"我早不喝三分糖了"）绝不能再
+    自信地排在最前。首次否认 importance ×DENY_FACTOR（0.1）；累积 DENY_TO_PENDING_AFTER
+    （2）次 → 直接转 pending（彻底退出检索，需重新写入确认才复活）。"""
+    fd = file_lock(refs_dir)
+    try:
+        mem_path = os.path.join(refs_dir, "memory.json")
+        memory = read_json_typed(mem_path, list, refs_dir, "memory")
+
+        denied = []
+        for e in memory:
+            if not isinstance(e, dict):
+                continue
+            if e.get("status") != "active":
+                continue
+            match = (e.get("id") == entity_or_id) or (e.get("entity") == entity_or_id)
+            if not match:
+                continue
+            cur_deny = _safe_float(e.get("deny_count", 0.0), 0.0)
+            new_deny = int(cur_deny) + 1
+            e["deny_count"] = new_deny
+            e["denied_at"] = ts_now()
+            if reason:
+                e["deny_reason"] = reason
+            cur_imp = _safe_float(e.get("importance", 1.0), 1.0)
+            e["importance"] = round(cur_imp * DENY_FACTOR, 6)
+            e["updated"] = ts_now()
+            if new_deny >= DENY_TO_PENDING_AFTER:
+                e["status"] = "pending"
+            denied.append({
+                "id": e.get("id"),
+                "entity": e.get("entity"),
+                "deny_count": new_deny,
+                "importance": e["importance"],
+                "status": e.get("status"),
+            })
+
+        if not denied:
+            print(json.dumps({"status": "nothing_to_deny", "entity_or_id": entity_or_id}, ensure_ascii=False))
+            return
+
+        safe_write_json(mem_path, memory)
+        print(json.dumps({
+            "status": "denied",
+            "count": len(denied),
+            "items": denied,
+        }, ensure_ascii=False))
+    finally:
+        file_unlock(fd, refs_dir)
+
+
+def cmd_expire_check(refs_dir):
+    """=== PATCH v2.9 (到期记忆) === 扫描带 expires_at 的记忆：
+    已到期 → 状态标 expired（移出 active，不再被检索召回，数据保留）；
+    未来 EXPIRY_REMIND_DAYS 天内到期 → 列入 remind（供主动提醒兑现/提及）。"""
+    fd = file_lock(refs_dir)
+    try:
+        mem_path = os.path.join(refs_dir, "memory.json")
+        memory = read_json_typed(mem_path, list, refs_dir, "memory")
+        now = datetime.now(TZ)
+        expired = []
+        remind = []
+        changed = False
+        for e in memory:
+            if not isinstance(e, dict):
+                continue
+            if e.get("status") != "active":
+                continue
+            raw = e.get("expires_at")
+            if not raw or not isinstance(raw, str):
+                continue
+            try:
+                exp_dt = ts_parse(raw)
+            except (ValueError, TypeError):
+                continue  # 解析不了的到期时间跳过，不误伤
+            if exp_dt <= now:
+                e["status"] = "expired"
+                e["expired_at"] = ts_now()
+                e["updated"] = ts_now()
+                changed = True
+                expired.append({
+                    "id": e.get("id"),
+                    "entity": e.get("entity"),
+                    "kind": e.get("kind"),
+                    "value": _safe_str(e.get("value")),
+                })
+            elif (exp_dt - now).total_seconds() / 86400.0 <= EXPIRY_REMIND_DAYS:
+                remind.append({
+                    "id": e.get("id"),
+                    "entity": e.get("entity"),
+                    "kind": e.get("kind"),
+                    "value": _safe_str(e.get("value")),
+                    "expires_at": raw,
+                    "days_left": round((exp_dt - now).total_seconds() / 86400.0, 1),
+                })
+        if changed:
+            safe_write_json(mem_path, memory)
+        print(json.dumps({
+            "status": "expire_checked",
+            "now": ts_now(),
+            "expired": expired,
+            "remind": remind,
+        }, ensure_ascii=False, indent=2))
+    finally:
+        file_unlock(fd, refs_dir)
+
+
+def cmd_recall(refs_dir, limit=3):
+    """=== PATCH v2.9 (主动回忆触发器) === 从记忆库里挑出"值得此刻想起的"几条。
+
+    不再被动等检索——给 AI 一个"主动翻旧账"的抓手。评分 = effective_importance（核心优先）
+    + 从未被提起过 + 带情感锚点 + 快到期（到期前最后提醒一次）。返回条目含 context /
+    emotion_tags，方便 AI 有温度地提起（"我想起你当时说……"）。"""
+    mem_path = os.path.join(refs_dir, "memory.json")
+    memory = read_json_typed(mem_path, list, refs_dir, "memory")
+    now = datetime.now(TZ)
+
+    scored = []
+    for e in memory:
+        if not isinstance(e, dict):
+            continue
+        if e.get("status") != "active":
+            continue
+        imp = effective_importance(e, now)
+        never = not e.get("last_recalled")
+        has_emotion = bool(e.get("context") or e.get("emotion_tags"))
+        expiring = False
+        raw = e.get("expires_at")
+        if raw and isinstance(raw, str):
+            try:
+                if 0 < (ts_parse(raw) - now).total_seconds() / 86400.0 <= EXPIRY_REMIND_DAYS:
+                    expiring = True
+            except (ValueError, TypeError):
+                pass
+        score = imp + (RECALL_BONUS_NEVER if never else 0) \
+            + (RECALL_BONUS_EMOTION if has_emotion else 0) \
+            + (RECALL_BONUS_EXPIRING if expiring else 0)
+        scored.append({
+            "score": round(score, 4),
+            "importance": round(imp, 4),
+            "id": e.get("id"),
+            "entity": e.get("entity"),
+            "kind": e.get("kind"),
+            "value": _safe_str(e.get("value")),
+            "context": e.get("context"),
+            "emotion_tags": e.get("emotion_tags"),
+            "never_recalled": never,
+            "expires_at": e.get("expires_at"),
+            "last_recalled": e.get("last_recalled"),
+        })
+
+    scored.sort(key=lambda x: -x["score"])
+    print(json.dumps({
+        "status": "recalled",
+        "count": len(scored),
+        "results": scored[:limit],
+    }, ensure_ascii=False, indent=2))
+
+
+# ---- 承诺追踪（promises.json）----
+def _promises_path(refs_dir):
+    return os.path.join(refs_dir, "promises.json")
+
+
+def _read_promises(refs_dir):
+    data = read_json_typed(_promises_path(refs_dir), dict, refs_dir, "promises")
+    if not isinstance(data, dict) or not isinstance(data.get("promises"), list):
+        data = {"promises": []}
+    return data
+
+
+def _write_promises(refs_dir, data):
+    safe_write_json(_promises_path(refs_dir), data)
+
+
+def cmd_promise(text, refs_dir, deadline=None):
+    """=== PATCH v2.9 (承诺建档) === AI 亲口答应的事，建档必追。
+
+    只要 AI 对用户做了承诺（明天写歌 / 纪念日准备惊喜 / 帮你查某件事），立即建档。
+    deadline 可选（YYYY-MM-DD 或 ISO），到期未完成会被 cmd_promise_check 主动戳。"""
+    text = _safe_str(text).strip()
+    if not text:
+        raise ValueError("承诺内容不能为空")
+    data = _read_promises(refs_dir)
+    entry = {
+        "id": f"pro_{datetime.now(TZ).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}",
+        "text": text,
+        "deadline": _parse_expiry(deadline),
+        "created_at": ts_now(),
+        "status": "open",
+        "completed_at": None,
+    }
+    data["promises"].append(entry)
+    _write_promises(refs_dir, data)
+    print(json.dumps({"status": "promised", "promise": entry}, ensure_ascii=False, indent=2))
+
+
+def cmd_promise_done(promise_id, refs_dir):
+    """=== PATCH v2.9 (承诺完成) === 完成一项划掉一项：open → done + completed_at。"""
+    data = _read_promises(refs_dir)
+    found = None
+    for p in data["promises"]:
+        if not isinstance(p, dict):
+            continue
+        if p.get("id") == promise_id and p.get("status") == "open":
+            p["status"] = "done"
+            p["completed_at"] = ts_now()
+            found = p
+            break
+    if not found:
+        print(json.dumps({"status": "nothing_to_done", "promise_id": promise_id}, ensure_ascii=False))
+        return
+    _write_promises(refs_dir, data)
+    print(json.dumps({"status": "promise_done", "promise": found}, ensure_ascii=False, indent=2))
+
+
+def cmd_promise_list(refs_dir):
+    """=== PATCH v2.9 (承诺清单) === 列出全部承诺：open 在前（含是否逾期）、done 在后。"""
+    data = _read_promises(refs_dir)
+    now = datetime.now(TZ)
+    open_items = []
+    done_items = []
+    for p in data["promises"]:
+        if not isinstance(p, dict):
+            continue
+        item = {
+            "id": p.get("id"),
+            "text": _safe_str(p.get("text")),
+            "deadline": p.get("deadline"),
+            "created_at": p.get("created_at"),
+            "completed_at": p.get("completed_at"),
+        }
+        if p.get("status") == "open":
+            overdue = False
+            if item["deadline"]:
+                try:
+                    overdue = ts_parse(item["deadline"]) < now
+                except (ValueError, TypeError):
+                    overdue = False
+            item["overdue"] = overdue
+            open_items.append(item)
+        elif p.get("status") == "done":
+            done_items.append(item)
+    open_items.sort(key=lambda x: (not x.get("overdue"), x.get("deadline") or "9999"))
+    print(json.dumps({
+        "status": "promises",
+        "open_count": len(open_items),
+        "done_count": len(done_items),
+        "open": open_items,
+        "done": done_items[-20:],  # 只回最近完成的，别撑爆输出
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_promise_check(refs_dir):
+    """=== PATCH v2.9 (承诺主动戳) === 未完成的承诺要经常主动触发提醒 AI：当时答应了还没做。
+
+    返回全部未完成承诺，逾期（deadline 已过）与"已过了好几天还没动静"的排最前——
+    供 AI 在每次会话开始时自查、或由定时任务主动推送，别让承诺默默消失。"""
+    data = _read_promises(refs_dir)
+    now = datetime.now(TZ)
+    pending = []
+    for p in data["promises"]:
+        if not isinstance(p, dict):
+            continue
+        if p.get("status") != "open":
+            continue
+        text = _safe_str(p.get("text"))
+        created = p.get("created_at")
+        deadline = p.get("deadline")
+        overdue = False
+        days_over = 0
+        if deadline:
+            try:
+                d = ts_parse(deadline)
+                diff = (now - d).total_seconds() / 86400.0
+                overdue = diff > 0
+                days_over = max(0, round(diff, 1))
+            except (ValueError, TypeError):
+                pass
+        # 无 deadline 的承诺，按创建时长排序（越久越该戳）
+        age_days = 0
+        if created:
+            try:
+                age_days = max(0, round((now - ts_parse(created)).total_seconds() / 86400.0, 1))
+            except (ValueError, TypeError):
+                pass
+        pending.append({
+            "id": p.get("id"),
+            "text": text,
+            "deadline": deadline,
+            "created_at": created,
+            "overdue": overdue,
+            "days_overdue": days_over,
+            "age_days": age_days,
+        })
+    # 逾期排最前，其次按（deadline 越近越急）→ 无 deadline 按创建越久越急
+    pending.sort(key=lambda x: (
+        not x.get("overdue"),
+        x.get("days_overdue"),
+        x.get("age_days"),
+    ))
+    print(json.dumps({
+        "status": "promise_check",
+        "unfulfilled_count": len(pending),
+        "unfulfilled": pending,
+    }, ensure_ascii=False, indent=2))
+
+
 def _unsuppress_entity(refs_dir, entity):
     """=== PATCH v2.8.3 (3.4b) === 把某实体从"已遗忘清单"里摘掉并重生成 prompt。
 
@@ -1280,6 +1640,11 @@ def cmd_init(mode, refs_dir):
     if not os.path.exists(prom_path):
         with open(prom_path, "w", encoding="utf-8") as f:
             f.write("# 承诺追踪\n\n")
+
+    # === PATCH v2.9 === 承诺数据文件（promises.md 保留为人类可读入口，真数据落 json）
+    proj_path = os.path.join(refs_dir, "promises.json")
+    if not os.path.exists(proj_path):
+        safe_write_json(proj_path, {"promises": []})
 
     print(json.dumps({
         "status": "initialized",
@@ -1379,6 +1744,8 @@ def cmd_recover(refs_dir):
                 emotion_tags=e.get("emotion_tags"),
                 core=e.get("core"),
                 reason=e.get("reason"),
+                context=e.get("context"),           # === PATCH v2.9 ===
+                expires_at=e.get("expires_at"),     # === PATCH v2.9 ===
             )
             recovered.append(ent_name)
         except Exception as ex:
@@ -1510,6 +1877,8 @@ def main():
             emotion_tags = None
             reason = None
             core = None
+            context = None
+            expires_at = None
             nm_args = []
             i = 0
             while i < len(args):
@@ -1528,13 +1897,17 @@ def main():
                     reason = args[i + 1]; i += 2
                 elif args[i] == "--core" and i + 1 < len(args):
                     core = args[i + 1].lower() in ("true", "1", "yes", "y"); i += 2
+                elif args[i] == "--context" and i + 1 < len(args):
+                    context = args[i + 1]; i += 2
+                elif args[i] == "--expires" and i + 1 < len(args):
+                    expires_at = args[i + 1]; i += 2
                 else:
                     nm_args.append(args[i]); i += 1
             if len(nm_args) < 3:
-                print(json.dumps({"error": "用法: write <entity> <kind> <value> [refs_dir] [--mode local] [--sentiment ...] [--source file_import|self_inferred|user_explicit] [--confidence 0..1] [--emotion-tags 占有,吃醋] [--reason 文本] [--core true|false]"}), file=sys.stderr)
+                print(json.dumps({"error": "用法: write <entity> <kind> <value> [refs_dir] [--mode local] [--sentiment ...] [--source file_import|self_inferred|user_explicit] [--confidence 0..1] [--emotion-tags 占有,吃醋] [--reason 文本] [--core true|false] [--context 当时的气氛] [--expires YYYY-MM-DD]"}), file=sys.stderr)
                 sys.exit(1)
             cmd_write(nm_args[0], nm_args[1], nm_args[2], refs_dir, mode, sentiment,
-                      source, confidence, emotion_tags, reason, core)
+                      source, confidence, emotion_tags, reason, core, context, expires_at)
         elif cmd == "search":
             nm_args = [a for a in args if not a.startswith("--")]
             if not nm_args:
@@ -1578,6 +1951,66 @@ def main():
             sleep_quality = args[2] if len(args) > 2 else "-"
             note = args[3] if len(args) > 3 else "-"
             cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir)
+        elif cmd == "deny":
+            reason = None
+            nm_args = []
+            i = 0
+            while i < len(args):
+                if args[i] == "--reason" and i + 1 < len(args):
+                    reason = args[i + 1]; i += 2
+                else:
+                    nm_args.append(args[i]); i += 1
+            if not nm_args:
+                print(json.dumps({"error": "用法: deny <entity|memory_id> [refs_dir] [--reason 文本]"}), file=sys.stderr)
+                sys.exit(1)
+            cmd_deny(nm_args[0], refs_dir, reason)
+        elif cmd == "expire":
+            cmd_expire_check(refs_dir)
+        elif cmd == "recall":
+            limit = 3
+            nm_args = []
+            i = 0
+            while i < len(args):
+                if args[i] == "--limit" and i + 1 < len(args):
+                    try:
+                        limit = max(1, min(10, int(args[i + 1])))
+                    except ValueError:
+                        pass
+                    i += 2
+                else:
+                    nm_args.append(args[i]); i += 1
+            cmd_recall(refs_dir, limit)
+        elif cmd == "promise":
+            if not args:
+                print(json.dumps({"error": "用法: promise <add|done|list|check> ..."}), file=sys.stderr)
+                sys.exit(1)
+            sub = args[0]
+            sub_args = args[1:]
+            if sub == "add":
+                deadline = None
+                nm_args = []
+                i = 0
+                while i < len(sub_args):
+                    if sub_args[i] == "--deadline" and i + 1 < len(sub_args):
+                        deadline = sub_args[i + 1]; i += 2
+                    else:
+                        nm_args.append(sub_args[i]); i += 1
+                if not nm_args:
+                    print(json.dumps({"error": "用法: promise add <承诺内容> [refs_dir] [--deadline YYYY-MM-DD]"}), file=sys.stderr)
+                    sys.exit(1)
+                cmd_promise(nm_args[0], refs_dir, deadline)
+            elif sub == "done":
+                if not sub_args:
+                    print(json.dumps({"error": "用法: promise done <promise_id> [refs_dir]"}), file=sys.stderr)
+                    sys.exit(1)
+                cmd_promise_done(sub_args[0], refs_dir)
+            elif sub == "list":
+                cmd_promise_list(refs_dir)
+            elif sub == "check":
+                cmd_promise_check(refs_dir)
+            else:
+                print(json.dumps({"error": f"未知 promise 子命令: {sub}（add/done/list/check）"}), file=sys.stderr)
+                sys.exit(1)
         elif cmd == "init":
             if not args:
                 print(json.dumps({"error": "用法: init <mode> [refs_dir]  mode: local"}), file=sys.stderr)

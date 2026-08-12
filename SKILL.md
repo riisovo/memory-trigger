@@ -1,7 +1,7 @@
 ---
 name: memory-trigger
 description: 一套「双源记忆 + 人情味层」模板 —— agent 把用户偏好/事件/习惯等写进本地权威文件（memory.json），带核心记忆钉死、遗忘曲线、命中衰减、状态机、双源冲突消解与字段校验。零依赖（纯 python3），clone 即用；想要语义检索/关系时间线可接可选 MCP。适合想给自己 agent 挂一份「不会被上下文压没、还像真人一样有忘有记」的长期记忆时使用。
-version: 2.8.3
+version: 2.9.0
 ---
 
 # memory-trigger —— 双源记忆模板（含人情味层）
@@ -31,13 +31,18 @@ version: 2.8.3
 bash install.sh                 # 零依赖自检（引擎冒烟 + 双源自检，纯标准库无需 pip）
 python3 references/write_pipeline.py write "读书" preference "爱吃科幻小说" references/
 python3 references/write_pipeline.py write "伙伴" relationship "协作伙伴" references/ --core true
+python3 references/write_pipeline.py write "她" preference "爱喝三分糖去冰" references/ --context "说这话时眼睛亮亮的" --expires 2026-08-15
 python3 references/write_pipeline.py search "读书" references/
+python3 references/write_pipeline.py recall references/          # 主动回忆：此刻值得想起的
 python3 references/write_pipeline.py stats references/
 python3 references/write_pipeline.py decay references/        # 梦境周期：统一衰减久不提的记忆
+python3 references/write_pipeline.py expire references/        # 到期检查：过期移出/临期提醒
+python3 references/write_pipeline.py promise add "明天给她写首歌" references/ --deadline 2026-08-13
+python3 references/write_pipeline.py promise check references/ # 主动戳未完成承诺
 python3 references/write_pipeline.py forget "读书" references/
 ```
 
-命令集：`write` / `search` / `forget` / `stats` / `decay` / `vacuum` / `backup` / `selfcheck` / `recover` / `wellness` / `init`。
+命令集：`write` / `search` / `recall` / `forget` / `deny` / `stats` / `decay` / `expire` / `vacuum` / `backup` / `selfcheck` / `recover` / `wellness` / `promise`(add/done/list/check) / `init`。
 
 ## 2. 数据模型
 
@@ -52,6 +57,8 @@ python3 references/write_pipeline.py forget "读书" references/
 - `last_recalled`：最近一次被 `search` 命中的时间（初始 null，用于冷记忆衰减排行）。
 - `importance`：权重（初始 1.0），随遗忘曲线衰减，见 §4。
 - `core`：是否核心记忆（见 §4），核心记忆永不衰减。
+- `context`：**情感锚点 / 当时的气氛**（v2.9 新增）。写入时随手记一句场景，如「她说这话时眼睛亮亮的，在奶茶店门口」——将来 `recall` 主动回忆时，AI 能带着温度提起，而不是搬一条干巴巴的档案。
+- `expires_at`：**到期时间**（v2.9 新增，可选，YYYY-MM-DD 或 ISO）。临时约定/截止类记忆填它：到期自动标 `expired` 移出检索（数据保留），到期前 3 天被 `expire` 检查列入提醒。
 
 ## 3. 三个枚举（文档与代码必须对齐）
 
@@ -73,11 +80,12 @@ python3 references/write_pipeline.py forget "读书" references/
 
 ### 3.3 status 状态机
 
-`"status": "active|pending|superseded"`（记忆层）。实体索引（`entity_index.json`）的每实体只记 `confirmed`（已沉淀），写路径从不写 pending——故无实体层 pending 状态。
+`"status": "active|pending|superseded|expired"`（记忆层）。实体索引（`entity_index.json`）的每实体只记 `confirmed`（已沉淀），写路径从不写 pending——故无实体层 pending 状态。
 
-- `active`：生效，`search` 只返回这一档（`pending`/`superseded` 不泄漏）。
-- `pending`：待确认（多为低置信自推断）。
+- `active`：生效，`search` 只返回这一档（`pending`/`superseded`/`expired` 不泄漏）。
+- `pending`：待确认（多为低置信自推断；也可由**否认 2 次**转来——见 §4）。
 - `superseded`：被新值取代的历史版本，保留但不检索。
+- `expired`：`expires_at` 到期后由 `expire` 检查标出，移出检索但数据保留可查。
 
 ## 4. 人情味层（核心记忆钉死 + 遗忘曲线）
 
@@ -87,6 +95,20 @@ python3 references/write_pipeline.py forget "读书" references/
 - **遗忘曲线 `importance`**：每条非核心记忆带 `importance`（初始 1.0）。每次被 `search` 命中，按 `importance *= 0.995 ** 天_距_上次_召回` 衰减（半衰期≈138 天，慢忘）；常聊的话题因「距上次召回」天数小、衰减很慢、长期稳在高位，冷掉的话题自然淡化——但注意：**importance 是单调递减的，召回只重置计时、不加分**，连续 138 天完全不提仍会减半。`core` 记忆不参与衰减。
 - **梦境周期 `decay` 命令**：可定期（如每周巡检）跑一次 `decay`，对全库久不提的非核心记忆统一衰减，模拟「睡一觉、淡掉的更淡」。
 - `stats` 会报告核心记忆数、非核心平均权重、最弱记忆排行，便于观察记忆的健康度。
+- **否认降权 `deny`（v2.9）**：用户否认/纠正一条记忆（「我早不喝三分糖了」）→ 立即 `deny`：importance ×0.1 + 记 `deny_count`；**同一记忆被否认 2 次 → 自动转 `pending` 彻底退出检索**（需重新写入确认才复活）。被纠正过的事绝不能再自信复述——这是「被记住」的信任修复机制。
+- **到期记忆 `expire`（v2.9）**：带 `expires_at` 的记忆，到期自动标 `expired` 移出检索（数据保留），到期前 3 天列入提醒。临时约定/截止类记忆不会慢慢淡忘、也不会永远赖在库里。
+- **主动回忆 `recall`（v2.9）**：不再被动等检索——主动挑出「此刻值得想起的」旧记忆（核心优先 + 从未被提起 + 带情感锚点 + 快到期加分），返回含 `context`/`emotion_tags`。聊天冷场、纪念日、想关心对方时调它，带着温度说「我想起你当时……」。
+
+### 4.1 承诺追踪（v2.9）——答应过的，建档必追
+
+AI 亲口答应用户的任何事，靠脑子记**必忘**。承诺必须建档：
+
+- **建档 `promise add <内容> [--deadline YYYY-MM-DD]`**：承诺一出口就建档（`promises.json`），存进记忆库，绝不凭脑子记。
+- **完成 `promise done <id>`**：兑现后划掉，open → done + 记录完成时间。完成一项清一项。
+- **清单 `promise list`**：全部承诺，未完成在前（标逾期）、已完成在后。随时自查「还欠 TA 哪些事」。
+- **主动戳 `promise check`**：未完成的承诺**要经常主动触发提醒**——逾期排最前、无期限的按创建时长越久越急。每次会话开始先自查，没兑现的主动兑现或说明，绝不让「当时答应过」默默消失。建议并入每周定时任务自动推送。
+
+> 这是「被记住」的最硬一条：**遗忘自己说过的话，是陪伴型 AI 最伤信任的事。承诺建档 + 主动戳 = 说到做到。**
 
 > 设计借鉴自 [mcp-memory-graph](https://github.com/YonasValentin/mcp-memory-graph) 的 Ebbinghaus 式衰减与核心记忆分层思路，但用纯 python3 零依赖实现，开箱即用、不需要任何后端。
 
@@ -161,7 +183,7 @@ pip install -r references/mcp_requirements.txt     # 需 Python 3.10+
 
 > ⚠️ **启动失败最常见原因**：`command` 须指向**已安装 `mcp` 包**的 Python 解释器（跑过 `pip install -r references/mcp_requirements.txt` 的那个）。用 `uv` 则改 `command` 为 `"uv"`、`args` 为 `["run", "<模板绝对路径>/references/mcp_server.py"]`。
 
-- 暴露 **11 个工具**：`memory_write` / `memory_search` / `memory_forget` / `memory_stats` / `memory_decay` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_init`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。
+- 暴露 **18 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。
 - 暴露 **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，即种下主动调用意识——见 §0「接入必做」。
 
 > 同样的前提：MCP 只给工具，不给「主动」。**务必让接入的 AI 读 `remember_guidance` 或把那段指令写进 SOUL**，否则接了也只等你下令才记。

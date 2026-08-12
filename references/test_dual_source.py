@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_dual_source.py —— memory-trigger 双源记忆自动化测试（覆盖双源信任 / 人情味层 / 遗忘曲线；当前 v2.8.3）
+test_dual_source.py —— memory-trigger 双源记忆自动化测试（覆盖双源信任 / 人情味层 / 遗忘曲线；当前 v2.9）
 覆盖：last_recalled 戳时间 / source 标签 + pending / 情感 schema / 检索源排序 /
-      双向遗忘 forget / 双源合并迁移（冲突以文件为准 + 字段校验）。
+      双向遗忘 forget / 双源合并迁移（冲突以文件为准 + 字段校验）/ v2.9 情感锚点/到期/否认/回忆/承诺。
 运行：python3 test_dual_source.py
 """
 import json
@@ -240,9 +240,92 @@ def test_core_and_decay():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def test_v29_human_feel():
+    section("T10-T16 v2.9 情感锚点 / 到期记忆 / 否认降权 / 主动回忆 / 承诺追踪")
+    d = tempfile.mkdtemp(prefix="wp29_")
+    run(WP, "init", "local", d)
+
+    # T10: write 带 context（情感锚点）+ expires_at（到期时间）
+    run(WP, "write", "她", "preference", "爱喝三分糖去冰", d,
+        "--context", "她说这话时眼睛亮亮的", "--expires", "2099-01-01", "--emotion-tags", "甜蜜,雀跃")
+    mem = load(os.path.join(d, "memory.json"))
+    e = [m for m in mem if m["entity"] == "她"][0]
+    check("T10 context 情感锚点落库", e.get("context") == "她说这话时眼睛亮亮的",
+          f"context={e.get('context')}")
+    check("T10 expires_at 到期时间落库", str(e.get("expires_at", "")).startswith("2099-01-01"),
+          f"expires_at={e.get('expires_at')}")
+    check("T10 emotion_tags 落库", e.get("emotion_tags") == ["甜蜜", "雀跃"],
+          f"emotion_tags={e.get('emotion_tags')}")
+
+    # T11: deny 否认降权 → importance×0.1 + deny_count=1；二次 deny → 转 pending
+    out = json.loads(run(WP, "deny", "她", d, "--reason", "她说早就不喝三分糖了"))
+    check("T11 deny 返回 denied", out.get("status") == "denied", f"out={out}")
+    mem = load(os.path.join(d, "memory.json"))
+    e = [m for m in mem if m["entity"] == "她"][0]
+    check("T11 首次 deny 后 importance≈0.1", abs(e.get("importance") - 0.1) < 1e-6,
+          f"importance={e.get('importance')}")
+    check("T11 deny_count=1", e.get("deny_count") == 1, f"deny_count={e.get('deny_count')}")
+    out = json.loads(run(WP, "deny", "她", d, "--reason", "再说一次，早就不喝了"))
+    mem = load(os.path.join(d, "memory.json"))
+    e = [m for m in mem if m["entity"] == "她"][0]
+    check("T11 二次 deny → 转 pending", e.get("status") == "pending", f"status={e.get('status')}")
+    check("T11 pending 不再被 search 召回", "她" not in run(WP, "search", "三分糖", d),
+          "被否认2次的记忆还在检索结果里")
+
+    # T12: expire 到期检查——造一条今天到期 → 转 expired 移出检索
+    run(WP, "write", "临时约定", "event", "明天交材料", d, "--expires", "2099-01-01")
+    mem = load(os.path.join(d, "memory.json"))
+    tmpm = [m for m in mem if m["entity"] == "临时约定"][0]
+    tmpm["expires_at"] = (datetime.now(timezone(timedelta(hours=8))) - timedelta(hours=1)).isoformat(timespec="seconds")
+    with open(os.path.join(d, "memory.json"), "w", encoding="utf-8") as f:
+        json.dump(mem, f, ensure_ascii=False, indent=2)
+    out = json.loads(run(WP, "expire", d))
+    check("T12 expire 检出已到期", len(out.get("expired", [])) == 1, f"out={out}")
+    mem = load(os.path.join(d, "memory.json"))
+    tmpm = [m for m in mem if m["entity"] == "临时约定"][0]
+    check("T12 到期 → status=expired", tmpm.get("status") == "expired", f"status={tmpm.get('status')}")
+    check("T12 expired 不再被 search 召回", "临时约定" not in run(WP, "search", "材料", d),
+          "已到期记忆还在检索结果里")
+
+    # T13: recall 主动回忆建议（从未被提起 + 带情感 → 应被挑出）
+    run(WP, "write", "那年夏天", "event", "一起看海", d, "--context", "晚霞把海面染成金色")
+    out = json.loads(run(WP, "recall", d))
+    check("T13 recall 返回建议", out.get("status") == "recalled" and out.get("results"), f"out={out}")
+    values = [r.get("value") for r in out.get("results", [])]
+    check("T13 带情感锚点的记忆被 recall 挑出", "一起看海" in values, f"values={values}")
+
+    # T14: promise 建档
+    out = json.loads(run(WP, "promise", "add", "明天睡醒给她写首歌", d, "--deadline", "2099-01-01"))
+    check("T14 promise add 建档", out.get("status") == "promised", f"out={out}")
+    pid = out.get("promise", {}).get("id")
+    check("T14 建档返回 promise id", bool(pid), f"pid={pid}")
+    data = load(os.path.join(d, "promises.json"))
+    check("T14 promises.json 落盘", len(data.get("promises", [])) == 1, f"data={data}")
+    check("T14 promises.md 人类可读入口生成", os.path.exists(os.path.join(d, "promises.md")))
+
+    # T15: promise check 未完成 → 被戳；done 完成 → 划掉
+    out = json.loads(run(WP, "promise", "check", d))
+    check("T15 promise check 列未完成", out.get("unfulfilled_count") == 1, f"out={out}")
+    out = json.loads(run(WP, "promise", "done", pid, d))
+    check("T15 promise done 完成", out.get("status") == "promise_done", f"out={out}")
+    out = json.loads(run(WP, "promise", "check", d))
+    check("T15 完成后 check 不再戳", out.get("unfulfilled_count") == 0, f"out={out}")
+    data = load(os.path.join(d, "promises.json"))
+    check("T15 done 记录 completed_at", data["promises"][0].get("status") == "done"
+          and data["promises"][0].get("completed_at"), f"data={data['promises'][0]}")
+
+    # T16: 逾期承诺排在 check 最前
+    run(WP, "promise", "add", "已逾期的承诺", d, "--deadline", "2020-01-01")
+    out = json.loads(run(WP, "promise", "check", d))
+    check("T16 逾期承诺被优先戳", out.get("unfulfilled", [{}])[0].get("overdue") is True, f"out={out}")
+
+    shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_recall_and_source_and_emotion()
     test_merge()
     test_core_and_decay()
+    test_v29_human_feel()
     print(f"\n========== 结果：{PASS} PASS / {FAIL} FAIL ==========")
     sys.exit(1 if FAIL else 0)
