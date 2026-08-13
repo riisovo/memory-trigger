@@ -7,9 +7,7 @@
 - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
 - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
 
-> 当前版本 **v2.10**（承诺闹钟 + 双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
->
-> **v2.10** —— 承诺闹钟：promise + deadline 自触发提醒，不再依赖宿主 cron。三条触发通道：MCP server 内置后台线程（常驻即巡检）、CLI `promise watch` 常驻子命令、会话内注入（任何记忆工具返回都带 `promise_reminders`）。推送：Bark / 自定义 webhook / 落盘 `.promise_reminders.md` 三路齐发。新增工具 `memory_promise_watch_status`（19 个工具）。
+> 当前版本 **v2.10**（承诺闹钟 + 双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变:
 
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
 
@@ -34,6 +32,8 @@
 - **到期记忆 expires_at + expire**：临时约定/截止类记忆带到期时间，到期自动移出检索、到期前 3 天提醒兑现。不会默默过时，也不会永远赖在库里。
 - **主动回忆 recall**：不再被动等检索——主动挑出「此刻值得想起的」旧记忆。**双通道设计**：常聊的按记得牢程度排；冷掉的旧事（从没提过 / 很久没召回）单独走「旧事重提」通道，不看衰减后权重、改看「从没提过 + 带当时的气氛 + 当初记得牢」，让 AI 会说「我想起你当时……」——遗忘只降权不销毁，旧事才能被捞回来。
 - **承诺追踪 promise**：AI 亲口答应的事【建档必追】——`promise add` 建档（promises.json）、`promise done` 完成划掉、`promise list` 清单自查、`promise check` 主动戳未完成（逾期排最前）。**遗忘自己说过的话是最伤信任的事，承诺建档 + 主动戳 = 说到做到。**
+
+**v2.10** —— 承诺闹钟：promise + deadline 自触发提醒，不再依赖宿主 cron。三条触发通道：MCP server 内置后台线程（常驻即巡检）、CLI `promise watch` 常驻子命令、会话内注入（任何记忆工具返回都带 `promise_reminders`）。推送：Bark / 自定义 webhook / 落盘 `.promise_reminders.md` 三路齐发。新增工具 `memory_promise_watch_status`（19 个工具）。
 
 ## 它解决什么
 

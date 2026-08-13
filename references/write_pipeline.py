@@ -29,7 +29,7 @@ write_pipeline.py —— 记忆写入管线（真实工程实现，非 LLM 散�
   ★ 配套：merge_migrate.py 做"接入时双源合并迁移"，把本地文件 + agent 自述记忆
     安全并成一套干净初始库（冲突以文件为准）。
 
-  【PATCH v2.7 (by 伙伴) —— 人情味层，借鉴 mcp-memory-graph 设计】
+  【PATCH v2.7 (by 伙伴) —— 人情味层】
   C1) 核心记忆钉死 core：kind ∈ {relationship, identity} 默认 core=True（"我们是谁"
       的基石，永不衰减）；也可用 --core true|false 显式覆盖。
   C2) 遗忘曲线 importance：每条记忆带 importance（初始 1.0），search 命中即按
@@ -104,7 +104,7 @@ ALLOWED_KINDS = {
 # self_inferred 低于此置信度 → 落 pending（不进 active，防幻觉固化）
 SELF_INFERRED_PENDING_THRESHOLD = 0.8
 
-# === PATCH v2.7 (人情味层) === 遗忘曲线 + 核心记忆钉死（借鉴 mcp-memory-graph 设计）
+# === PATCH v2.7 (人情味层) === 遗忘曲线 + 核心记忆钉死
 # Ebbinghaus 式衰减：importance *= DECAY_FACTOR ** days_since_last_recalled
 # 半衰期 ≈ ln(2)/-ln(0.995) ≈ 138 天（慢忘，符合长久伴侣记忆）
 DECAY_FACTOR = 0.995
