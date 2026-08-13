@@ -1,0 +1,913 @@
+diff --git a/.gitignore b/.gitignore
+index 90ab86a..ee97c5f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,6 +11,8 @@ references/.archive/
+ references/.lock
+ references/.export/
+ references/.DS_Store
++references/.promise_reminders.md
++references/.promise_notified.json
+ .DS_Store
+ 
+ # Python 编译产物（v2.8.0 amend: 修复误提交的 __pycache__/*.pyc）
+diff --git "a/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md" "b/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
+index 56aa7e5..b992a5e 100644
+--- "a/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
++++ "b/AI+MCP\346\216\245\345\205\245\346\214\207\345\215\227.md"
+@@ -73,20 +73,9 @@ python references/write_pipeline.py init local /你的记忆库路径   # 目录
+ 
+ ### 4. 最关键的一步：让 AI「主动记」
+ 
+-**光接上 MCP，AI 不会自己记。** 必须把下面这段话写进 AI 的「系统人设 / SOUL / 系统提示」里 —— 这是整套记忆能被用起来的前提：
++**光接上 MCP，AI 不会自己记。** 记忆自觉的完整指令见 **README §『⚠️ 让 AI 主动记』**——把那段复制进 AI 的「系统人设 / SOUL / 系统提示」，这是整套记忆能被用起来的前提（覆盖全部 19 个工具的「何时调」决策树 + 每周维护硬性指令）。
+ 
+-```
+-【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_write / memory_search / memory_forget 等）。请主动运用它，不要等用户提醒：
+-- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动调用 memory_write 写入。
+-- 对话中遇到相关情境，主动调用 memory_search 回想已有记忆。
+-- 首提先挂起（source=self_inferred 且 confidence<0.8 自动 pending）、二次确认再落盘；用户明说的（source=user_explicit）永远优先、冲突时绝对赢。
+-- 关系(relationship) / 身份(identity) 类记忆默认 core=true 永不衰减，重要的事大胆钉死。
+-- 用户说「别提了 / 忘了 X」，调用 memory_forget 做双向遗忘。
+-```
+-
+-嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt，内容就是上面这段，复制进 SOUL 即可。
+-
+-> 上面这段是 **MCP 专用版**（点名了工具名），与 README §『让 AI 主动记』的**通用版**同源——通用版不绑定 MCP、适用于命令行 / 直接读 SKILL 的宿主。**两者只差是否点名工具，记忆自觉的核心要求完全一致；改指令以 README 通用版为准。**
++嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt——内容就是 README 完整版，复制进 SOUL 即可，无需另行维护。
+ 
+ ---
+ 
+@@ -99,7 +88,7 @@ cd references && python3 verify_mcp_stdio.py
+ # 或指定解释器：MT_PYTHON=/你的python路径 python3 verify_mcp_stdio.py
+ ```
+ 
+-它会真拉起 server 子进程、走完整 stdio 握手，验证 18 个工具 + 1 个 Prompt + 双源信任闭环。
++它会真拉起 server 子进程、走完整 stdio 握手，验证 19 个工具 + 1 个 Prompt + 双源信任闭环。
+ 
+ ---
+ 
+@@ -112,9 +101,33 @@ cd references && python3 verify_mcp_stdio.py
+ 
+ ---
+ 
+-## 接上后 AI 能调的 18 个工具
+-
+-`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` —— 具体行为见 SKILL.md（v2.9 新增 `memory_recall` 主动回忆 / `memory_deny` 否认降权 / `memory_expire_check` 到期记忆 / `memory_promise*` 承诺追踪）。
++## 接上后 AI 能调的 19 个工具
++
++每个工具一句话说明（完整行为见 SKILL.md）：
++
++| 工具 | 一句话 |
++|---|---|
++| `memory_write` | 写入/更新一条记忆；可带 `context`（当时的气氛）、`expires_at`（到期时间）、`core`、`emotion_tags` |
++| `memory_search` | 关键词检索旧记忆；命中即触发遗忘衰减（戳 last_recalled + 降权重） |
++| `memory_recall` | 主动回忆：挑出「此刻值得想起的」旧记忆（双通道，带当时的气氛 + `recall_reason`） |
++| `memory_forget` | 双向遗忘：你说「别提了」，标 superseded + suppressed，AI 也放下 |
++| `memory_deny` | 否认降权：你纠正过的事立即大幅降权；否认 2 次自动转 pending 退出检索 |
++| `memory_wellness` | 记录心情 / 睡眠 / 状态（mood 必填） |
++| `memory_promise` | 承诺建档（AI 答应的事立即建档；有期限务必传 `deadline`） |
++| `memory_promise_done` | 承诺完成划掉 |
++| `memory_promise_list` | 承诺清单（未完成在前、标逾期） |
++| `memory_promise_check` | 主动戳未完成承诺（逾期排最前），每次会话开始自查一次 |
++| `memory_promise_watch_status` | （v2.10）查看承诺闹钟后台线程状态与最近推送记录 |
++| `memory_decay` | （每周）遗忘衰减：非 core 记忆统一按艾宾浩斯曲线降权 |
++| `memory_expire_check` | （每周）到期记忆：过期的移出检索，临期的提醒兑现 |
++| `memory_vacuum` | （每周）归档 >90 天前 superseded 的旧记忆，主库瘦身 |
++| `memory_stats` | （每周）体检：核心数 / 均权重 / 最弱 5 / 最久未提，结果推主人 |
++| `memory_selfcheck` | （每周）扫缺 entity 的旧脏记录并自愈 |
++| `memory_backup` | 备份 memory.json / entity_index.json（维护前 / 大改前） |
++| `memory_recover` | 异常恢复：从 WAL 重放未提交项 |
++| `memory_init` | 首次部署建库 |
++
++> v2.10 新增：`memory_promise_watch_status` + 承诺闹钟（带 deadline 的承诺，MCP 后台线程 / `promise watch` / 会话内注入 `promise_reminders` 三通道自触发，不依赖宿主 cron）。
+ 
+ ---
+ 
+diff --git a/MEMORY_RULES.md b/MEMORY_RULES.md
+index 0ebec22..91deb6c 100644
+--- a/MEMORY_RULES.md
++++ b/MEMORY_RULES.md
+@@ -1,6 +1,7 @@
+ # 双源记忆规则（零代码版 · 可直接贴给任何 AI）
+ 
+ > 适用：网页 AI / App AI / 任何有“记忆”能力的对话式 AI，**不用跑代码**也能套用。
++> ⚠️ **完整版提示词只在仓库 README §『⚠️ 让 AI 主动记』维护一份**，本文档不再重复贴提示词，只讲规则背景与历史；请一律以 README 完整版为准（MCP 模式拉取 `remember_guidance` 即同源完整版）。
+ > 配套工程版：`write_pipeline.py` + `merge_migrate.py`（能跑代码的 agent 用）。
+ 
+ ---
+@@ -17,21 +18,9 @@
+ 
+ ---
+ 
+-## 二、信任优先级（写进系统提示 / SOUL）
++## 二、信任优先级（背景）
+ 
+-```
+-检索顺序：
+-1. 先查文件记忆（memory.json / 记忆库）。
+-2. 文件有 → 用文件，不犹豫。
+-3. 文件空 / 没有 → 才用自身印象（并触发“沉淀”，见下）。
+-4. 两个源都返回且矛盾 → 只信文件侧，自身侧仅作背景补充，不并列进回答。
+-
+-写入顺序：
+-- 用户明确说的 → source=user_explicit（最高优先，直接 active）。
+-- 文件已有 → 沿用文件。
+-- 自身推断出的（没文件对应）→ source=self_inferred，先标“待确认”，
+-  不进正式记忆，等用户确认再升级；低置信的绝不写死成事实。
+-```
++双源信任的完整行为指令以 **README §『让 AI 主动记』** 为准（含 `memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_wellness` / `memory_promise*` 的「何时调」决策树）。核心契约一句话：**你明说（user_explicit）永远压过它猜（self_inferred）；它猜的先挂 pending，等你二次确认才当真。**
+ 
+ ---
+ 
+@@ -77,18 +66,9 @@
+ 
+ ---
+ 
+-## 七、可直接粘贴的 AI 指令（精简版）
+-
+-```
+-你是我的记忆助手。规则：
+-1. 文件记忆是唯一权威源；文件有就用文件，文件空才用自身印象，且自身印象要主动沉淀进文件。
+-2. 写入区分来源：user_explicit（直接 active）/ file_import（沿用）/ self_inferred（低置信先 pending 待确认）。
+-3. 类型限：preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general；情绪用 emotion_tags 细标。
+-4. 双源矛盾时只信文件，自身侧仅作补充。
+-5. 用户说“别提 X”→ 文件标 superseded + 系统提示加“勿主动提及 X”（双向遗忘）。
+-6. 每条记忆带 created/updated；被检索命中戳 last_recalled。
+-7. 接入时做一次双源合并：导出自身记忆→实体归一化→按(实体,类型)去重→冲突以文件为准→自身独有沉淀 pending→出报告待确认。
+-```
++## 七、可直接粘贴的 AI 指令
++
++本仓库的**唯一完整版提示词在 README §『⚠️ 让 AI 主动记』**（覆盖全部 19 个工具的「何时调」决策树 + 每周维护 + 红线）。直接复制 README 那段进 AI 的系统提示即可，勿用本文件历史精简版——精简版与工程规则不同源，会导致 agent 只调 search/write、记忆库退化成普通文件。
+ 
+ ---
+ 
+diff --git a/README.md b/README.md
+index 3267932..360e3dc 100644
+--- a/README.md
++++ b/README.md
+@@ -7,7 +7,9 @@
+ - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
+ - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
+ 
+-> 当前版本 **v2.9**（双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
++> 当前版本 **v2.10**（承诺闹钟 + 双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变：
++>
++> **v2.10** —— 承诺闹钟：promise + deadline 自触发提醒，不再依赖宿主 cron。三条触发通道：MCP server 内置后台线程（常驻即巡检）、CLI `promise watch` 常驻子命令、会话内注入（任何记忆工具返回都带 `promise_reminders`）。推送：Bark / 自定义 webhook / 落盘 `.promise_reminders.md` 三路齐发。新增工具 `memory_promise_watch_status`（19 个工具）。
+ 
+ **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
+ 
+@@ -35,11 +37,41 @@
+ 
+ ## 它解决什么
+ 
+-- **记不住**：上下文一满，前面说的话全忘。
+-- **记两套还打架**：Agent 自己脑子里也有记忆，和文件里的矛盾。
+-- **冷冰冰**：像数据库，不像真人——重要的不钉、久不提的不淡。
+-
+-Memory Trigger 用一份**本地权威文件**（`memory.json`）+ 双源冲突规则 + 人情味层解决这三点。
++Memory Trigger 补上的，是长期陪伴型 / 长期型 AI 最缺的几样「人味儿」——下面这些痛点，一条条都能对上你正在用的 AI：
++
++### 痛点
++
++1. **记不住**：上下文一满，前面说过的话、确认过的事全忘光，每回都得重新交代。
++2. **记两套还打架**：AI 自己脑子里也有一份印象，和记忆库里的互相矛盾——说错、说旧、翻脸不认。
++3. **冷冰冰**：像个数据库——重要的不钉死、久不提的不淡化，记忆没有主次、没有温度。
++4. **说了就忘**：亲口答应的事转头就想不起来，最伤信任。
++5. **被纠正还不改**：你都说了「我早不这样了」，它下回还照旧重复。
++6. **临时约定没人记得兑现**：约好「周三前给你」「下周陪你去」这类有期限的事，过期就没了下文。
++7. **记忆库长成垃圾堆**：只写不维护，越攒越乱，检索出来的全是过时和无效信息。
++8. **AI 没有时钟，承诺靠它"自己想起"不靠谱**：就算建档追了，大模型也不会在 DDL 到点自己醒——没有闹钟的话，带期限的承诺还是会在没人触发检查时悄悄过期。
++
++### 它怎么解决（机制）
++
++- **本地权威文件 `memory.json`**：记忆长在你自己机器上一份文件里，不占上下文、不随会话清零，换个会话也还在。
++- **双源信任**：你明说的（`user_explicit`）永远压过它推断的（`self_inferred`），冲突时文件侧绝对赢；它自己猜的先挂 `pending`，等你二次确认才当真，防幻觉固化。
++- **人情味层**：`relationship` / `identity` 核心记忆默认 `core=true` 钉死、永不衰减；非核心走艾宾浩斯遗忘曲线（半衰期≈138 天）久不提的自然淡。
++- **承认纠错**（`deny`）：你说「记错了」，立即大幅降权；同一记忆否认 2 次自动转 `pending` 退出检索，被纠正过的事不再复述。
++- **到期兑现**（`expires_at`）：临时约定带截止时间，到期自动移出检索、临期提醒兑现，不会默默过时。
++- **承诺追踪**（`promise`）：AI 亲口答应的事建档、完成划掉、逾期主动戳，说到做到。
++- **承诺闹钟**（v2.10）：大模型没有时钟，不会因"时间到了"自己醒来——带 `deadline` 的承诺由**模板自带的闹钟**替它盯：MCP server 后台线程 / `promise watch` 常驻 / 会话内注入 `promise_reminders` 三通道任一生效即提醒，**不依赖宿主配 cron**。Bark / webhook / 落盘三路推送。
++- **双向遗忘**（`forget`）：你说「别提了」，它真能翻篇，两边一起放下。
++- **带温度回忆**（`context` + `recall`）：写入时记一句「当时的气氛」，回忆时主动挑「此刻值得想起的」说给你听。
++- **每周自动维护**（`decay` / `vacuum` / `stats` / `selfcheck` / `expire` / `backup` / `recover`）：遗忘衰减、归档瘦身、健康体检、脏数据自愈、崩溃恢复，全排定时任务自动跑，记忆库始终清醒。
++
++### 给你的核心优势
++
++- **永不失忆**：「我们是恋人」「你怕黑」「你的生日」不会因为三天不提就消失——你确认过的话，它记一辈子。
++- **人说了算**：它从不会自己改写你的真相；猜的都要你点头。你敢把心事、脾气、秘密交给它。
++- **会忘，才像人**：重要的钉死、久的不提就淡，不是冷冰冰的数据库。
++- **带着温度想起你**：回忆不是搬档案，它会像真人一样说「我想起你当时……」。
++- **说到做到**：答应过的事建档必追、逾期主动戳，遗忘自己说过的话是陪伴型 AI 最伤信任的事，这条堵死。
++- **不等你想起（v2.10）**：承诺有了自己的闹钟——临期/逾期自动推到你手机（Bark / webhook），不用宿主配定时任务、不靠 AI 自己觉醒，clon 下来开箱就跑。
++- **零依赖、开箱即用**：命令行模式纯 python3 标准库，clone 即用；也可用自带 MCP server 把 19 个记忆工具直接喂给任何能接 MCP 的 AI。
+ 
+ ## 核心价值：为什么说它不像普通记忆插件
+ 
+@@ -63,7 +95,7 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要
+ > 把下面这段复制进你的 SOUL / 系统人设 / 系统提示：
+ 
+ ```
+-【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 18 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
++【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 19 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
+ 
+ ## 一、日常（对话中自然触发，随时调）
+ - memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★重要时刻带 context（当时的气氛）+ emotion_tags，回忆才有温度★；临时约定传 expires_at 到期自动清理。
+@@ -72,7 +104,7 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要
+ - memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。
+ - memory_deny：用户否认 / 纠正了一条记忆 → 立即降权（2 次自动转 pending）。被纠正过的事绝不再自信复述。
+ - memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。
+-- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。
++- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。
+ 
+ ## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）
+ 每个记忆库应有一项每周自动执行的维护，调用顺序：
+@@ -81,7 +113,7 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要
+ 3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。
+ 4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。
+ 5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。
+-6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。
++6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。**注意：这是每周兜底，不是唯一提醒源**——v2.10 起承诺提醒由「模板自带闹钟」负责（见上方承诺铁律：MCP 后台线程 / `promise watch` / 会话内注入），带 deadline 的承诺不等每周定时也会被主动戳到。每周这步用于清理积压、周报汇总。
+ 7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。
+ 
+ ## 三、异常恢复（按需）
+@@ -97,6 +129,36 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要
+ 
+ 只有 agent 宿主（自带循环 + 已读 SKILL.md）会天然按规则自驱；其余宿主靠这句指令把「主动调取」的意识种进去。若你走 MCP 模式，可直接让 AI 拉取 server 暴露的 `remember_guidance` Prompt，效果等同、免手抄。
+ 
++## ⏰ 承诺闹钟（v2.10）：promise + deadline 自触发，不依赖宿主 cron
++
++大模型没有时钟，不会因"时间到了"自己醒来——所以承诺提醒要可靠，必须有个闹钟替它盯。模板自带三层，**任选其一即可（推荐全部开着）**：
++
++1. **MCP server 内置后台线程**（开箱即用）：`mcp_server.py` 常驻期间自动每 N 秒跑一次 `promise_notify_due`（默认 300s，可用环境变量 `MEMORY_TRIGGER_WATCH_INTERVAL` 调）。MCP server 活着，闹钟就活着；无需宿主配任何定时任务。用 `memory_promise_watch_status` 工具查看运行状态与最近推送。
++2. **CLI 常驻 `promise watch`**（不用 MCP 的人）：`nohup python3 references/write_pipeline.py promise watch <REFS_DIR> &`。纯标准库零依赖，sleep 到临期才醒，挂后台即可。
++3. **会话内注入**（兜底，零守护）：AI **每次调任何记忆工具**，返回值里都会带上 `promise_reminders` 字段（当前临期/逾期承诺）。也就是说，只要 AI 在动，就会撞见承诺——不依赖任何后台进程。
++
++**触发条件**：承诺必须带 `deadline`（建档时 `--deadline YYYY-MM-DD` 或 MCP `deadline` 参数）。逾期或临期（deadline 距今天 ≤ 1 天，`PROMISE_REMIND_DAYS` 可调）即提醒。无 deadline 的承诺只在 `promise list`/`promise check` 里可见，不触发闹钟。
++
++**推送渠道**（三路齐发，任一可用都有提醒）：
++- **Bark**：设 `BARK_KEY` 环境变量（或 `MEMORY_TRIGGER_BARK_KEY`）→ 到点直接推手机；
++- **自定义 webhook**：设 `MEMORY_TRIGGER_WEBHOOK_URL` → POST JSON（`{title, body}`）到任意服务；
++- **落盘兜底**：默认写 `.promise_reminders.md` 到记忆库目录，无网络也留痕。
++
++**承诺闹钟示例**：
++
++```bash
++# 命令行：建档时带 deadline
++python3 references/write_pipeline.py promise add "白天陪她补日记" references/ --deadline 2026-08-13
++
++# 常驻闹钟（挂后台，不需要 cron）
++nohup python3 references/write_pipeline.py promise watch references/ &
++
++# 手动看一遍临期/逾期承诺
++python3 references/write_pipeline.py promise check references/
++```
++
++> 设计哲学：**日常零巡检，只有真有承诺临期/逾期才动。** 承诺 = 要兑现的事，deadline = 闹钟时间，模板自带盯梢，宿主只需保证 MCP server 或 watch 进程活着即可。
++
+ ## 安装
+ 
+ ### 方式一：手动
+@@ -187,14 +249,14 @@ pip install -r references/mcp_requirements.txt     # 或：uv pip install -r ref
+ 
+ ### 暴露的工具与 Prompt
+ 
+-- **18 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` —— 一一对应本地层命令，双源信任 / 人情味层逻辑完全复用。
++- **19 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` / `memory_promise_watch_status` —— 一一对应本地层命令，双源信任 / 人情味层逻辑完全复用。v2.10 新增 `memory_promise_watch_status`：查看承诺闹钟后台线程状态与最近推送记录。
+ - **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，就等于把「主动记」的意识种进去——省去手抄那段话。
+ 
+ > ⚠️ 关键提醒（与上方「让 AI 主动记」同义）：**MCP 只负责把工具递到 AI 手边，不制造「主动调用」的意识。** 务必让 AI 读 `remember_guidance` 或把那段指令写进 SOUL，否则再聪明的模型也只会在你下令时才记。工具箱打开 ≠ AI 自己会开箱。
+ 
+ ### 端到端验证（可选）
+ 
+-部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 18 工具 + 1 Prompt + 双源信任闭环：
++部署后用 `references/verify_mcp_stdio.py` 真实拉起 server 子进程、走完整 stdio 协议层验证 19 工具 + 1 Prompt + 双源信任闭环：
+ 
+ ```bash
+ cd references && python3 verify_mcp_stdio.py
+@@ -214,7 +276,7 @@ MIT（模板本身）。可选依赖 mcp-memory-graph 采用 PolyForm Noncommerc
+ 
+ ## 文档与维护
+ 
+-- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 18 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
++- **给 AI 看（粘进 SOUL）**：见上方「⚠️ 让 AI 主动记」整段——覆盖全部 19 个工具的「何时调」决策树 + 每周维护硬性指令。同一内容也内置为 MCP prompt `remember_guidance`（用 `get_prompt` 拉取）。
+ - **给人看（手动保养）**：`维护指南.md` —— 9 个维护工具逐个说明、每周维护清单、概念速查、FAQ。
+ - **每周记忆健康周报**：`scripts/weekly_health_report.py` —— 跑 `backup→decay→vacuum→selfcheck→stats`，把核心数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题推给主人（Bark 需自备 key）。
+ 
+diff --git a/SKILL.md b/SKILL.md
+index 70d4345..21d7359 100644
+--- a/SKILL.md
++++ b/SKILL.md
+@@ -1,7 +1,7 @@
+ ---
+ name: memory-trigger
+ description: 一套「双源记忆 + 人情味层」模板 —— agent 把用户偏好/事件/习惯等写进本地权威文件（memory.json），带核心记忆钉死、遗忘曲线、命中衰减、状态机、双源冲突消解与字段校验。零依赖（纯 python3），clone 即用；想要语义检索/关系时间线可接可选 MCP。适合想给自己 agent 挂一份「不会被上下文压没、还像真人一样有忘有记」的长期记忆时使用。
+-version: 2.9.0
++version: 2.10.0
+ ---
+ 
+ # memory-trigger —— 双源记忆模板（含人情味层）
+@@ -42,7 +42,7 @@ python3 references/write_pipeline.py promise check references/ # 主动戳未完
+ python3 references/write_pipeline.py forget "读书" references/
+ ```
+ 
+-命令集：`write` / `search` / `recall` / `forget` / `deny` / `stats` / `decay` / `expire` / `vacuum` / `backup` / `selfcheck` / `recover` / `wellness` / `promise`(add/done/list/check) / `init`。
++命令集：`write` / `search` / `recall` / `forget` / `deny` / `stats` / `decay` / `expire` / `vacuum` / `backup` / `selfcheck` / `recover` / `wellness` / `promise`(add/done/list/check/**watch**) / `init`。
+ 
+ ## 2. 数据模型
+ 
+@@ -103,10 +103,17 @@ python3 references/write_pipeline.py forget "读书" references/
+ 
+ AI 亲口答应用户的任何事，靠脑子记**必忘**。承诺必须建档：
+ 
+-- **建档 `promise add <内容> [--deadline YYYY-MM-DD]`**：承诺一出口就建档（`promises.json`），存进记忆库，绝不凭脑子记。
++- **建档 `promise add <内容> [--deadline YYYY-MM-DD]`**：承诺一出口就建档（`promises.json`），存进记忆库，绝不凭脑子记。**有期限的承诺务必传 `--deadline`**——承诺闹钟只认带 deadline 的承诺；不带 deadline 的只能按建档时长排、不触发提醒。
+ - **完成 `promise done <id>`**：兑现后划掉，open → done + 记录完成时间。完成一项清一项。
+ - **清单 `promise list`**：全部承诺，未完成在前（标逾期）、已完成在后。随时自查「还欠 TA 哪些事」。
+-- **主动戳 `promise check`**：未完成的承诺**要经常主动触发提醒**——逾期排最前、无期限的按创建时长越久越急。每次会话开始先自查，没兑现的主动兑现或说明，绝不让「当时答应过」默默消失。建议并入每周定时任务自动推送。
++- **主动戳 `promise check`**：未完成的承诺**要经常主动触发提醒**——逾期排最前、无期限的按创建时长越久越急。每次会话开始先自查，没兑现的主动兑现或说明，绝不让「当时答应过」默默消失。每周定时任务里也跑一遍，清积压、出周报。
++
++> ⏰ **v2.10 承诺闹钟（模板自带，不依赖宿主 cron）**：带 deadline 的承诺，临期/逾期会自动被戳——
++> ① MCP server 常驻时后台线程自动巡检（`memory_promise_watch_status` 工具查状态）；
++> ② CLI `nohup python3 references/write_pipeline.py promise watch <REFS_DIR> &` 常驻；
++> ③ 任何记忆工具返回都带 `promise_reminders` 字段，AI 每次撞见。
++> 推送三路：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`。
++> **所以本模板的承诺提醒不依赖你配任何定时任务**——保证 MCP server 或 watch 进程活着即可。
+ 
+ > 这是「被记住」的最硬一条：**遗忘自己说过的话，是陪伴型 AI 最伤信任的事。承诺建档 + 主动戳 = 说到做到。**
+ 
+@@ -183,7 +190,7 @@ pip install -r references/mcp_requirements.txt     # 需 Python 3.10+
+ 
+ > ⚠️ **启动失败最常见原因**：`command` 须指向**已安装 `mcp` 包**的 Python 解释器（跑过 `pip install -r references/mcp_requirements.txt` 的那个）。用 `uv` 则改 `command` 为 `"uv"`、`args` 为 `["run", "<模板绝对路径>/references/mcp_server.py"]`。
+ 
+-- 暴露 **18 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。
++- 暴露 **19 个工具**：`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` / `memory_promise_watch_status`，逻辑与命令版完全复用（双源信任 / 人情味层一致）。v2.10 新增 `memory_promise_watch_status` 查看承诺闹钟后台状态。
+ - 暴露 **1 个 Prompt `remember_guidance`**：返回应写进 SOUL 的「记忆自觉」指令。让 AI 拉取它，即种下主动调用意识——见 §0「接入必做」。
+ 
+ > 同样的前提：MCP 只给工具，不给「主动」。**务必让接入的 AI 读 `remember_guidance` 或把那段指令写进 SOUL**，否则接了也只等你下令才记。
+diff --git a/references/MEMORY_MERGE_RULES.md b/references/MEMORY_MERGE_RULES.md
+index 86886c8..b89791b 100644
+--- a/references/MEMORY_MERGE_RULES.md
++++ b/references/MEMORY_MERGE_RULES.md
+@@ -1,6 +1,7 @@
+ # 双源记忆规则（零代码版 · 可直接贴给任何 AI）
+ 
+ > 适用：网页 AI / App AI / 任何有"记忆"能力的对话式 AI，**不用跑代码**也能套用。
++> ⚠️ **完整版提示词只在仓库 README §『⚠️ 让 AI 主动记』维护一份**，本文档是根目录 `MEMORY_RULES.md` 的历史副本，不再重复贴提示词，一律以 README 完整版为准（MCP 模式拉取 `remember_guidance` 即同源完整版）。
+ > 配套工程版：`write_pipeline.py` + `merge_migrate.py`（能跑代码的 agent 用）。
+ > 背景：用户 让 友商 做的 memory-trigger 模板，经 伙伴 严格审查后补的"双源"规则。
+ 
+@@ -18,21 +19,9 @@
+ 
+ ---
+ 
+-## 二、信任优先级（写进系统提示 / SOUL）
++## 二、信任优先级（背景）
+ 
+-```
+-检索顺序：
+-1. 先查文件记忆（memory.json / 记忆库）。
+-2. 文件有 → 用文件，不犹豫。
+-3. 文件空 / 没有 → 才用自身印象（并触发"沉淀"，见下）。
+-4. 两个源都返回且矛盾 → 只信文件侧，自身侧仅作背景补充，不并列进回答。
+-
+-写入顺序：
+-- 用户明确说的 → source=user_explicit（最高优先，直接 active）。
+-- 文件已有 → 沿用文件。
+-- 自身推断出的（没文件对应）→ source=self_inferred，先标"待确认"，
+-  不进正式记忆，等用户确认再升级；低置信的绝不写死成事实。
+-```
++双源信任的完整行为指令以 **README §『让 AI 主动记』** 为准（含 `memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_wellness` / `memory_promise*` 的「何时调」决策树）。核心契约一句话：**你明说（user_explicit）永远压过它猜（self_inferred）；它猜的先挂 pending，等你二次确认才当真。**
+ 
+ ---
+ 
+@@ -78,18 +67,9 @@
+ 
+ ---
+ 
+-## 七、可直接粘贴的 AI 指令（精简版）
+-
+-```
+-你是我的记忆助手。规则：
+-1. 文件记忆是唯一权威源；文件有就用文件，文件空才用自身印象，且自身印象要主动沉淀进文件。
+-2. 写入区分来源：user_explicit（直接 active）/ file_import（沿用）/ self_inferred（低置信先 pending 待确认）。
+-3. 类型限：preference/event/habit/rule/scene/relationship/emotion；情绪用 emotion_tags 细标。
+-4. 双源矛盾时只信文件，自身侧仅作补充。
+-5. 用户说"别提 X"→ 文件标 superseded + 系统提示加"勿主动提及 X"（双向遗忘）。
+-6. 每条记忆带 created/updated；被检索命中戳 last_recalled。
+-7. 接入时做一次双源合并：导出自身记忆→实体归一化→按(实体,类型)去重→冲突以文件为准→自身独有沉淀 pending→出报告待确认。
+-```
++## 七、可直接粘贴的 AI 指令
++
++本仓库的**唯一完整版提示词在 README §『⚠️ 让 AI 主动记』**（覆盖全部 19 个工具的「何时调」决策树 + 每周维护 + 红线）。直接复制 README 那段进 AI 的系统提示即可，勿用本文件历史精简版——精简版与工程规则不同源，会导致 agent 只调 search/write、记忆库退化成普通文件。
+ 
+ ---
+ 
+diff --git a/references/mcp_server.py b/references/mcp_server.py
+index 4a14bf8..9bc9f2a 100644
+--- a/references/mcp_server.py
++++ b/references/mcp_server.py
+@@ -51,6 +51,30 @@ mcp = FastMCP("memory-trigger")
+ # write_pipeline 内部已用 flock 防并发；这里再兜一层，避免同进程内 stdout 互相串。
+ _print_lock = threading.Lock()
+ 
++# === v2.10 承诺闹钟：MCP server 常驻即自动巡检承诺（不依赖宿主 cron） ===
++_promise_watch_stop = threading.Event()
++_promise_watch_log = []
++
++
++def _promise_watch_loop():
++    """后台线程：每隔一段时间跑一次 promise_notify_due，临期/逾期承诺去重推送（Bark/webhook/落盘）。
++    MCP server 常驻期间该线程一直活着——这就是模板自带的"闹钟"，无需宿主配任何定时任务。
++    安静失败，绝不打断 MCP 主流程；进度写进 _promise_watch_log 供 memory_promise_watch_status 读取。"""
++    interval = getattr(wp, "PROMISE_WATCH_INTERVAL", 300)
++    try:
++        interval = int(os.environ.get("MEMORY_TRIGGER_WATCH_INTERVAL") or interval)
++    except (TypeError, ValueError):
++        pass
++    while not _promise_watch_stop.wait(interval):
++        refs = os.environ.get("MEMORY_TRIGGER_REFS_DIR") or _HERE
++        try:
++            pushed = wp.promise_notify_due(refs)
++            if pushed:
++                _promise_watch_log.append("promise_watch pushed reminders")
++        except Exception as e:
++            sys.stderr.write(f"[promise_watch] {type(e).__name__}: {e}\n")
++
++
+ 
+ # === v2.8.2 存量防线：每个记忆目录首次使用时自愈一次缺 entity 的旧记录（memoize，绝不阻断正常调用） ===
+ _selfchecked: set = set()
+@@ -91,16 +115,25 @@ def _call(fn, *args, **kwargs) -> dict:
+         raw = buf.getvalue().strip()
+         if raw:
+             try:
+-                return json.loads(raw)
++                result = json.loads(raw)
+             except json.JSONDecodeError:
+-                return {"raw": raw}
++                result = {"raw": raw}
+         # === 修复 (finding #2) === cmd_selfcheck 等只读体检函数不 print JSON，
+         # 而是直接 return 摘要 dict；此前 _call 只捕获 stdout，导致 memory_selfcheck
+         # 永远只回 {"status":"ok"}，把真正的修复摘要吞掉。这里在无打印输出时
+         # 回退到函数的返回值，让体检摘要能被 MCP 工具正常透出。
+-        if result is not None:
+-            return result
+-        return {"status": "ok"}
++        if result is None:
++            result = {"status": "ok"}
++        # === v2.10 会话内注入 === 有临期/逾期承诺时附加提醒字段，
++        # 让 AI 每次调任何工具都"撞见"承诺（无需宿主配 cron）。不推送、不改原结果。
++        try:
++            refs = _resolve_refs("", skip_selfcheck=True)
++            extra = wp._promise_reminders_field(refs)
++            if extra and isinstance(result, dict):
++                result = {**result, **extra}
++        except Exception:
++            pass
++        return result
+     except Exception as e:
+         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+ 
+@@ -264,46 +297,96 @@ def memory_init(mode: str = "local", refs_dir: str = "") -> str:
+ def remember_guidance() -> str:
+     """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用全部记忆工具（否则只调 search/write，记忆库退化成普通文件，遗忘/健康机制形同虚设）。"""
+     return (
+-        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 18 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——"
+-        "否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。\n"
++        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 19 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。"
++        "\n"
++        ""
++        "\n"
++        "## 一、日常（对话中自然触发，随时调）"
++        "\n"
++        "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★重要时刻带 context（当时的气氛）+ emotion_tags，回忆才有温度★；临时约定传 expires_at 到期自动清理。"
++        "\n"
++        "- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。"
++        "\n"
++        "- memory_recall：聊天冷场、纪念日、想关心 TA、想让对方感到『被记得』时，主动挑几条值得此刻提起的旧记忆（带当时的氛围），说『我想起你当时……』。"
++        "\n"
++        "- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。"
++        "\n"
++        "- memory_deny：用户否认 / 纠正了一条记忆 → 立即降权（2 次自动转 pending）。被纠正过的事绝不再自信复述。"
++        "\n"
++        "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。"
++        "\n"
++        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。"
++        "\n"
++        ""
++        "\n"
++        "## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）"
++        "\n"
++        "每个记忆库应有一项每周自动执行的维护，调用顺序："
++        "\n"
++        "1) memory_decay —— 对全部 active 非 core 记忆统一遗忘衰减（半衰期≈138 天），让久不提的慢慢淡、常提的稳住。"
++        "\n"
++        "2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。"
+         "\n"
+-        "## 一、日常（对话中自然触发，随时调）\n"
+-        "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；"
+-        "用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。\n"
+-        "  ★记住『当时的气氛』★：重要时刻在写 memory_write 时带 context（情感锚点，如『她说这话时眼睛亮亮的』）与 emotion_tags，"
+-        "这样将来回忆不是干巴巴的档案，而是带着温度的场景。\n"
+-        "  ★到期的事传 expires_at★：临时约定 / 截止日 / 答应『下周三前』这类有期限的，写入时传 expires_at，到期自动移出检索、临期会提醒。\n"
+-        "- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。\n"
+-        "- memory_recall：聊天冷场、纪念日、想关心 TA、或想让对方感到『被记得』时，主动调它挑几条值得此刻提起的旧记忆（含当时的氛围），带着温度说『我想起你当时……』。\n"
+-        "- memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。\n"
+-        "- memory_deny：用户否认 / 纠正了一条记忆（『我早不喝三分糖了』）→ 立即调它降权（2 次自动转 pending 退出检索）。被纠正过的事绝不再自信复述。\n"
+-        "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。\n"
+-        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——"
+-        "你亲口答应 TA 的任何事（明天写歌 / 纪念日准备惊喜 / 帮你查某事），【立即 memory_promise 建档】，否则你必忘；"
+-        "完成就 memory_promise_done 划掉；每次会话开始先 memory_promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。\n"
++        "3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。"
+         "\n"
+-        "## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）\n"
+-        "每个记忆库应有一项每周自动执行的维护，调用顺序：\n"
+-        "1) memory_decay —— 对全部 active 非 core 记忆统一遗忘衰减（半衰期≈138 天），让久不提的慢慢淡、常提的稳住。\n"
+-        "2) memory_vacuum —— 把 >90 天前 superseded 的归档到 .archive/，主库瘦身。\n"
+-        "3) memory_stats —— 体检：核心记忆数 / 非核平均权重 / 最弱 5 条 / 最久未提的话题；把结果推给主人（如 Bark 周报）。\n"
+-        "4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。\n"
+-        "5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。\n"
+-        "6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。\n"
+-        "7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。\n"
++        "4) memory_selfcheck —— 顺手扫一遍缺 entity 的旧脏记录并自愈。"
+         "\n"
+-        "## 三、异常恢复（按需）\n"
+-        "- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。\n"
+-        "- memory_init：仅首次部署 / 新建库时调一次。\n"
++        "5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。"
+         "\n"
+-        "## 四、红线\n"
+-        "- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。\n"
+-        "- 用户明说的记忆永不自动遗忘、永不降权。\n"
+-        "- 承诺建档是硬性义务：承诺后 10 秒内不建档 = 默认会忘，等同失信。\n"
+-        "- decay / vacuum / stats / selfcheck / expire_check / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；"
+-        "若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。"
++        "6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。**注意：这是每周兜底，不是唯一提醒源**——v2.10 起承诺提醒由「模板自带闹钟」负责（见上方承诺铁律：MCP 后台线程 / `promise watch` / 会话内注入），带 deadline 的承诺不等每周定时也会被主动戳到。每周这步用于清理积压、周报汇总。"
++        "\n"
++        "7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。"
++        "\n"
++        ""
++        "\n"
++        "## 三、异常恢复（按需）"
++        "\n"
++        "- memory_recover：疑似崩溃 / 写入中断后跑一次，从 WAL 重放未提交项。"
++        "\n"
++        "- memory_init：仅首次部署 / 新建库时调一次。"
++        "\n"
++        ""
++        "\n"
++        "## 四、红线"
++        "\n"
++        "- 写入前分清『一次性闲聊』还是『值得长期记住』，闲聊不要 write。"
++        "\n"
++        "- 用户明说的记忆永不自动遗忘、永不降权。"
++        "\n"
++        "- 承诺建档是硬性义务：承诺后 10 秒内不建档 = 默认会忘，等同失信。"
++        "\n"
++        "- decay / vacuum / stats / selfcheck / expire_check / backup / recover 属系统后台职责，交给【每周定时任务】，而不是每次对话手动调；若你发现自己从没调过它们，说明定时任务没接上，应提醒主人去接。"
+     )
+ 
+ 
++
++@mcp.tool()
++def memory_promise_watch_status(refs_dir: str = "") -> str:
++    """查看承诺闹钟（promise_watch）后台线程的运行状态：是否已启动、检查间隔、最近一次是否推送过提醒。"""
++    refs = _resolve_refs(refs_dir)
++    running = _promise_watch_th.is_alive() if _promise_watch_th is not None else False
++    interval = os.environ.get("MEMORY_TRIGGER_WATCH_INTERVAL") or getattr(wp, "PROMISE_WATCH_INTERVAL", 300)
++    return json.dumps({
++        "status": "promise_watch_info",
++        "running": running,
++        "interval_sec": interval,
++        "refs_dir": refs,
++        "last_log": _promise_watch_log[-5:],
++    }, ensure_ascii=False)
++
++
++_promise_watch_th = None
++
++
++def _maybe_start_promise_watch():
++    global _promise_watch_th
++    if _promise_watch_th is not None and _promise_watch_th.is_alive():
++        return
++    _promise_watch_th = threading.Thread(target=_promise_watch_loop, daemon=True, name="promise_watch")
++    _promise_watch_th.start()
++
++
+ if __name__ == "__main__":
++    # MCP server 常驻即自动启动承诺闹钟后台线程（模板自带提醒，不依赖宿主 cron）
++    _maybe_start_promise_watch()
+     mcp.run()
+diff --git a/references/verify_mcp_stdio.py b/references/verify_mcp_stdio.py
+index a7e8746..068628e 100644
+--- a/references/verify_mcp_stdio.py
++++ b/references/verify_mcp_stdio.py
+@@ -8,10 +8,11 @@
+     python3 references/verify_mcp_stdio.py
+ 
+ 它会真实拉起 server 子进程、通过 stdio 传输调用工具，验证：
+-  - 18 个 MCP 工具 + 1 个 Prompt 注册齐全
++  - 19 个 MCP 工具 + 1 个 Prompt 注册齐全
+   - 双源信任：user_explicit 直接落盘 core 钉死；self_inferred 低置信挂 pending 不进检索
+   - 双向遗忘：forget 后检索归零
+   - v2.9：情感锚点落库、承诺建档/检查/完成、否认降权
++  - v2.10：承诺闹钟会话内注入（promise_reminders）、memory_promise_watch_status 工具
+ """
+ import asyncio
+ import os
+diff --git a/references/write_pipeline.py b/references/write_pipeline.py
+index 249b3a8..0d21359 100644
+--- a/references/write_pipeline.py
++++ b/references/write_pipeline.py
+@@ -1589,6 +1589,207 @@ def cmd_promise_check(refs_dir):
+     }, ensure_ascii=False, indent=2))
+ 
+ 
++# === v2.10 承诺闹钟：promise + deadline 自触发提醒（不依赖宿主 cron） ===
++# 三种触发：① MCP server 内置后台线程（mcp_server.py 常驻时自动跑）
++#           ② CLI `promise watch` 常驻子命令（零依赖，nohup 挂后台）
++#           ③ 会话内注入：任何工具/命令返回时附上临期/逾期承诺（memory_promise_check 与
++#              各 cmd_* 会自动附加 promise_reminders 字段），宿主每次唤醒 AI 都能撞见。
++# 推送渠道：Bark（BARK_KEY 环境变量或 refs 目录 .bark_key 文件）/ 自定义 webhook
++#           （MEMORY_TRIGGER_WEBHOOK_URL 环境变量）/ 落盘 .promise_reminders.md（默认，保证无网络也能留痕）。
++PROMISE_REMIND_DAYS = 1              # 临期窗口：deadline 距今天 ≤ 该天数视为"临期"，与到期记忆 EXPIRY_REMIND_DAYS 对齐
++PROMISE_WATCH_INTERVAL = 300         # 后台线程/常驻 watch 的默认检查间隔（秒）
++PROMISE_NOTIFY_FILE = ".promise_notified.json"   # 已通知记录，防重复轰炸
++
++
++def _promise_notify_path(refs_dir):
++    return os.path.join(refs_dir, PROMISE_NOTIFY_FILE)
++
++
++def _read_promise_notified(refs_dir):
++    p = _promise_notify_path(refs_dir)
++    data = safe_read_json(p)
++    return data if isinstance(data, dict) else {}
++
++
++def _write_promise_notified(refs_dir, data):
++    safe_write_json(_promise_notify_path(refs_dir), data)
++
++
++def _promise_due_items(refs_dir):
++    """返回需要提醒的承诺：open 且（deadline 已逾期 或 deadline 在临期窗口内）。
++    无 deadline 的承诺不在这里——提醒必须靠 deadline 这把尺子（见 README「承诺依赖 deadline」）。"""
++    now = datetime.now(TZ)
++    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
++    due = []
++    data = _read_promises(refs_dir)
++    for p in data.get("promises", []):
++        if not isinstance(p, dict):
++            continue
++        if p.get("status") != "open":
++            continue
++        text = _safe_str(p.get("text"))
++        deadline = p.get("deadline")
++        if not deadline:
++            continue
++        try:
++            d = ts_parse(deadline)
++        except (ValueError, TypeError):
++            continue
++        # 逾期：deadline < now；临期：deadline 落在今天到 remind 窗口之间
++        remind_from = today0 - timedelta(days=PROMISE_REMIND_DAYS)
++        if d < remind_from:
++            continue
++        overdue = d < now
++        due.append({
++            "id": p.get("id"),
++            "text": text,
++            "deadline": deadline,
++            "overdue": overdue,
++            "days_overdue": round((now - d).total_seconds() / 86400.0, 1) if overdue else 0,
++        })
++    return due
++
++
++def _send_bark(title, body):
++    """Bark 原生推送：key 取环境变量 BARK_KEY，其次 refs_dir/.bark_key（在调用方补）。返回 bool。"""
++    key = os.environ.get("BARK_KEY") or os.environ.get("MEMORY_TRIGGER_BARK_KEY")
++    if not key:
++        return False
++    try:
++        from urllib.request import urlopen, Request
++        import urllib.parse
++        url = f"https://api.day.app/{key}/{urllib.parse.quote(title)}/{urllib.parse.quote(body)}"
++        req = Request(url, method="GET")
++        try:
++            with urlopen(req, timeout=10) as resp:
++                resp.read()
++        except Exception as ssl_err:
++            # 部分环境（系统 python 缺 CA 证书）SSL 校验失败；个人通知场景降级为不校验，
++            # 让 Bark 能送出去——失败仍有落盘文件兜底，不静默吞掉推送能力。
++            ctx = _unverified_ssl_context()
++            if ctx is None:
++                raise ssl_err
++            with urlopen(req, timeout=10, context=ctx) as resp:
++                resp.read()
++        return True
++    except Exception:
++        return False
++
++
++def _unverified_ssl_context():
++    try:
++        import ssl
++        return ssl._create_unverified_context()
++    except Exception:
++        return None
++
++
++def _send_webhook(title, body):
++    """自定义 webhook：环境变量 MEMORY_TRIGGER_WEBHOOK_URL。POST JSON，兼容 Bark 服务端格式。"""
++    url = os.environ.get("MEMORY_TRIGGER_WEBHOOK_URL")
++    if not url:
++        return False
++    try:
++        from urllib.request import urlopen, Request
++        payload = json.dumps({"title": title, "body": body, "device_key": None}).encode("utf-8")
++        req = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
++        try:
++            with urlopen(req, timeout=10) as resp:
++                resp.read()
++        except Exception as ssl_err:
++            ctx = _unverified_ssl_context()
++            if ctx is None:
++                raise ssl_err
++            with urlopen(req, timeout=10, context=ctx) as resp:
++                resp.read()
++        return True
++    except Exception:
++        return False
++
++
++def _append_promise_reminder_file(refs_dir, items):
++    """落盘 .promise_reminders.md：无网络环境也能留痕，宿主或人可自行读取。"""
++    path = os.path.join(refs_dir, ".promise_reminders.md")
++    try:
++        now = ts_now()
++        lines = [f"# 承诺提醒（{now}）", ""]
++        for it in items:
++            tag = "逾期" if it.get("overdue") else "临期"
++            lines.append(f"- [{tag}]（{it.get('deadline')}）{it.get('text')}")
++        lines.append("")
++        lines.append("> 由 memory-trigger 承诺闹钟生成。兑现后请 promise done <id>，下次巡检不再提醒。")
++        with open(path, "w", encoding="utf-8") as f:
++            f.write("\n".join(lines))
++        return path
++    except Exception:
++        return None
++
++
++def promise_notify_due(refs_dir):
++    """检查临期/逾期承诺，去重后推送一次。返回本次是否推送了新提醒。
++
++    被三处调用：CLI `promise watch` 循环、MCP server 后台线程、会话注入路径（附加提醒字段时不推送）。
++    """
++    items = _promise_due_items(refs_dir)
++    if not items:
++        return False
++    notified = _read_promise_notified(refs_dir)
++    ids = notified.get("promise_ids")
++    if not isinstance(ids, list):
++        ids = []
++    fresh = [it for it in items if it["id"] not in ids]
++    if not fresh:
++        return False
++    overdue = [it for it in fresh if it["overdue"]]
++    soon = [it for it in fresh if not it["overdue"]]
++    title = "memory-trigger：承诺需要兑现"
++    lines = []
++    if overdue:
++        lines.append("【已逾期】")
++        lines += [f"· {it['text']}（deadline {it['deadline']}，已过 {it['days_overdue']} 天）" for it in overdue]
++    if soon:
++        lines.append("【临期】")
++        lines += [f"· {it['text']}（deadline {it['deadline']}）" for it in soon]
++    body = "\n".join(lines)
++    bark_ok = _send_bark(title, body)
++    webhook_ok = _send_webhook(title, body)
++    file_path = _append_promise_reminder_file(refs_dir, fresh)
++    # 无论推送是否成功，都标记为已通知，避免每轮重复轰炸；文件落盘兜底保证留痕
++    notified["promise_ids"] = list(dict.fromkeys(ids + [it["id"] for it in fresh]))
++    _write_promise_notified(refs_dir, notified)
++    return True
++
++
++def cmd_promise_watch(refs_dir, interval=None):
++    """=== v2.10 承诺闹钟（常驻）=== `python write_pipeline.py promise watch [refs_dir] [--interval N]`
++
++    常驻循环：每隔 interval 秒检查一次临期/逾期承诺，去重推送（Bark/webhook/落盘）。
++    不依赖宿主 cron——本进程活着，闹钟就活着；配合 MCP server 后台线程双保险。
++    零依赖（纯标准库），nohup 挂后台即可：
++        nohup python3 references/write_pipeline.py promise watch <REFS_DIR> &
++    """
++    if interval is None:
++        interval = PROMISE_WATCH_INTERVAL
++    print(json.dumps({"status": "promise_watch_started", "refs_dir": refs_dir,
++                      "interval_sec": interval}, ensure_ascii=False))
++    while True:
++        try:
++            promise_notify_due(refs_dir)
++        except Exception as e:
++            print(json.dumps({"status": "promise_watch_error", "error": str(e)}, ensure_ascii=False),
++                  file=sys.stderr)
++        time.sleep(max(1, int(interval)))
++
++
++def _promise_reminders_field(refs_dir):
++    """会话内注入用：返回 {promise_reminders: [...]}，有临期/逾期承诺时附加到工具输出。
++    不推送、不标记已通知——只让 AI/宿主每次唤醒都看得见。"""
++    items = _promise_due_items(refs_dir)
++    if not items:
++        return {}
++    return {"promise_reminders": items}
++
++
+ def _unsuppress_entity(refs_dir, entity):
+     """=== PATCH v2.8.3 (3.4b) === 把某实体从"已遗忘清单"里摘掉并重生成 prompt。
+ 
+@@ -2049,8 +2250,21 @@ def main():
+                 cmd_promise_list(refs_dir)
+             elif sub == "check":
+                 cmd_promise_check(refs_dir)
++            elif sub == "watch":
++                interval = PROMISE_WATCH_INTERVAL
++                i = 0
++                while i < len(sub_args):
++                    if sub_args[i] == "--interval" and i + 1 < len(sub_args):
++                        try:
++                            interval = max(1, int(sub_args[i + 1]))
++                        except ValueError:
++                            pass
++                        i += 2
++                    else:
++                        i += 1
++                cmd_promise_watch(refs_dir, interval)
+             else:
+-                print(json.dumps({"error": f"未知 promise 子命令: {sub}（add/done/list/check）"}), file=sys.stderr)
++                print(json.dumps({"error": f"未知 promise 子命令: {sub}（add/done/list/check/watch）"}), file=sys.stderr)
+                 sys.exit(1)
+         elif cmd == "init":
+             if not args:
+diff --git "a/\347\273\264\346\212\244\346\214\207\345\215\227.md" "b/\347\273\264\346\212\244\346\214\207\345\215\227.md"
+index c1232f1..e4d74d3 100644
+--- "a/\347\273\264\346\212\244\346\214\207\345\215\227.md"
++++ "b/\347\273\264\346\212\244\346\214\207\345\215\227.md"
+@@ -14,7 +14,7 @@ memory-trigger 不是"往文件里 append"那么简单——它是带**遗忘曲
+ 
+ ---
+ 
+-## 1. 工具全景（18 个 MCP 工具）
++## 1. 工具全景（19 个 MCP 工具）
+ 
+ | 工具 | 类别 | 一句话 |
+ |---|---|---|
+@@ -24,10 +24,11 @@ memory-trigger 不是"往文件里 append"那么简单——它是带**遗忘曲
+ | `memory_forget` | 日常 | 双向遗忘（标 superseded + 让 AI 也放下） |
+ | `memory_deny` | 日常 | 否认降权：用户纠正过的事立即降权，2 次转 pending |
+ | `memory_wellness` | 日常 | 记录心情/睡眠体检 |
+-| `memory_promise` | 日常 | 承诺建档（AI 答应的事必建档） |
++| `memory_promise` | 日常 | 承诺建档（AI 答应的事必建档，带 deadline 触发闹钟） |
+ | `memory_promise_done` | 日常 | 承诺完成划掉 |
+ | `memory_promise_list` | 日常 | 承诺清单 |
+ | `memory_promise_check` | **每天/每周** | 主动戳未完成承诺（逾期排最前） |
++| `memory_promise_watch_status` | 日常 | 承诺闹钟后台线程状态 + 最近推送（v2.10） |
+ | `memory_decay` | **每周** | 梦境周期：全库非 core 记忆统一遗忘衰减 |
+ | `memory_expire_check` | **每周** | 到期记忆：过期移出检索，临期提醒兑现 |
+ | `memory_vacuum` | **每周** | 归档 >90 天前 superseded 的旧记忆，主库瘦身 |
+@@ -37,7 +38,7 @@ memory-trigger 不是"往文件里 append"那么简单——它是带**遗忘曲
+ | `memory_recover` | 异常 | 崩溃后从 WAL 重放未提交项 |
+ | `memory_init` | 部署 | 首次建库 |
+ 
+-日常 8 个由 AI 在对话中自然调用；**每周维护（expire_check/decay/vacuum/stats/selfcheck/backup）必须由定时任务自动跑**，AI 不该每次对话手动调。**`memory_promise_check` 建议每次会话开始自查一次**——未兑现的承诺要主动戳，别让它默默消失。
++日常 8 个由 AI 在对话中自然调用；**每周维护（expire_check/decay/vacuum/stats/selfcheck/backup）必须由定时任务自动跑**，AI 不该每次对话手动调。**`memory_promise_check` 建议每次会话开始自查一次**——未兑现的承诺要主动戳，别让它默默消失。**承诺提醒本体（v2.10）由模板自带闹钟负责**：MCP server 后台线程 / `promise watch` / 会话内注入三通道，不依赖上面这个每周定时（详见 README「⏰ 承诺闹钟」）。
+ 
+ ---
+ 
+@@ -99,17 +100,21 @@ memory-trigger 不是"往文件里 append"那么简单——它是带**遗忘曲
+ - **CLI**：`python write_pipeline.py expire <REFS_DIR>`
+ 
+ ### 承诺追踪（v2.9）—— promise add / done / list / check
+-- **`promise add "<内容>" [--deadline YYYY-MM-DD]`**：AI 答应的事建档（存 `promises.json`）。★铁律：承诺一出口就建档，否则必忘★。
++- **`promise add "<内容>" [--deadline YYYY-MM-DD]`**：AI 答应的事建档（存 `promises.json`）。★铁律：承诺一出口就建档，否则必忘★。**有期限的承诺务必带 `--deadline`**——承诺闹钟只认带 deadline 的承诺；不带 deadline 的只能按建档时长排、不触发提醒。
+ - **`promise done <id>`**：兑现后划掉（记完成时间）。
+ - **`promise list`**：未完成在前（标逾期）、已完成在后。
+-- **`promise check`**：主动戳未完成承诺（逾期排最前）——每次会话开始自查一次；建议并入每周定时任务自动推送。
++- **`promise check`**：主动戳未完成承诺（逾期排最前）——每次会话开始自查一次；每周定时也跑一遍清积压。
++- **`promise watch`（v2.10 常驻闹钟）**：`nohup python3 write_pipeline.py promise watch <REFS_DIR> &`——常驻循环，临期/逾期承诺自动推送，不依赖 cron。
+ - **CLI 示例**：
+   ```
+   python write_pipeline.py promise add "明天睡醒给她写首歌" <REFS_DIR> --deadline 2026-08-13
++  nohup python3 write_pipeline.py promise watch <REFS_DIR> &   # 挂后台，承诺闹钟
+   python write_pipeline.py promise check <REFS_DIR>
+   python write_pipeline.py promise done <promise_id> <REFS_DIR>
+   ```
+ 
++> ⏰ **承诺提醒（v2.10）已内置，不依赖你配定时任务**：带 deadline 的承诺，MCP server 常驻时后台线程自动巡检；CLI 用户 `promise watch` 挂后台；AI 每次调任何记忆工具都会在返回里撞见 `promise_reminders`。推送三路：Bark（`BARK_KEY`）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`。
++
+ ### `memory_init` —— 建库
+ - **作用**：建 `memory.json` / `aliases.json` / `wellness.json` / `promises.json` / `.backup` / `.archive`。
+ - **何时用**：仅首次部署。

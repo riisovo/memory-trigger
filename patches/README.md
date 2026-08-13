@@ -1,3 +1,48 @@
+memory-trigger 补丁包：升到 v2.10（承诺闹钟）
+================================================
+
+本补丁覆盖 v2.9 → v2.10（含 v2.9 遗留的所有文档收敛）。停在 v2.9 的部署请打：
+
+  • 停在 v2.9 的用户  → memory-trigger-v2.9-v2.10.patch
+
+（GitHub main / 线上克隆当前已是 **v2.10 终态**，新部署直接 clone/pull 主线即可；
+停在 v2.9 的外部老部署才需要本补丁。已在干净 v2.9 工作树用 git apply --check 验证可干净 apply。）
+
+包含改动（相对 v2.9）
+-------------------------
+> 注：本补丁为 **v2.9 → main 完整 diff**（已排除 patches/ 自身），因此除代码外，
+> 文档（README / SKILL.md / MEMORY_RULES.md / 维护指南 / 接入指南 / references/*）与
+> 新增运行时忽略规则（.gitignore 的 .promise_*）也一并包含——apply 后文档不再停在旧版。
+
+1. references/write_pipeline.py
+   - **v2.10 承诺闹钟**：promise + deadline 自触发提醒，不再依赖宿主 cron
+     · `_promise_due_items`：仅 open 且带 deadline 的承诺，逾期或临期（<1d）视为 due
+     · `promise_notify_due`：去重推送（.promise_notified.json），Bark / webhook / 落盘三路
+     · `promise watch` 常驻子命令（纯标准库，sleep 到临期才醒，挂后台即可）
+     · `_promise_reminders_field`：会话内注入字段（任何命令返回都带临期/逾期承诺）
+     · 环境变量：PROMISE_REMIND_DAYS / PROMISE_WATCH_INTERVAL / MEMORY_TRIGGER_WEBHOOK_URL
+   - v2.9 遗留：提示词收敛到 README 单点维护（remember_guidance 逐字同步完整版）
+2. references/mcp_server.py
+   - **v2.10 承诺闹钟内置后台线程**（daemon，默认 300s，MEMORY_TRIGGER_WATCH_INTERVAL 可调）
+   - 新工具 `memory_promise_watch_status`（第 19 个工具）
+   - `_call` 每工具返回附加 promise_reminders 会话注入
+   - remember_guidance 与 README 决策树逐字一致（含 19 工具 + watch_status）
+   - 修正 `_call` 误引 result_ret 的问题
+3. 文档（版本号统一 v2.10 / 工具数 18→19）
+   - README：版本 v2.10、『它解决什么』补承诺闹钟（痛点 8 / 机制 / 优势）、
+     「让 AI 主动记」决策树含 watch_status、承诺铁律三通道+三推送渠道、
+     新增「⏰ 承诺闹钟」小节、工具列表 18→19
+   - SKILL.md：version 2.10.0、4.1 承诺追踪、工具列表 18→19
+   - 维护指南.md：工具全景 19 表 + 承诺追踪 v2.10
+   - AI+MCP接入指南.md：19 工具逐工具一句话说明表格（v2.10 补丁新增）
+   - MEMORY_RULES.md / references/MEMORY_MERGE_RULES.md：18→19
+
+---
+
+更早的补丁（v2.8.x）见本文件下文：
+
+---
+
 memory-trigger 补丁包：升到 v2.8.3（含 v2.8.2 entity 修复 + v2.8.3 三十 bug 加固）
 =============================================================================
 
