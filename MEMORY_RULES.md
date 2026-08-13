@@ -1,6 +1,7 @@
 # 双源记忆规则（零代码版 · 可直接贴给任何 AI）
 
 > 适用：网页 AI / App AI / 任何有“记忆”能力的对话式 AI，**不用跑代码**也能套用。
+> ⚠️ **完整版提示词只在仓库 README §『⚠️ 让 AI 主动记』维护一份**，本文档不再重复贴提示词，只讲规则背景与历史；请一律以 README 完整版为准（MCP 模式拉取 `remember_guidance` 即同源完整版）。
 > 配套工程版：`write_pipeline.py` + `merge_migrate.py`（能跑代码的 agent 用）。
 
 ---
@@ -17,21 +18,9 @@
 
 ---
 
-## 二、信任优先级（写进系统提示 / SOUL）
+## 二、信任优先级（背景）
 
-```
-检索顺序：
-1. 先查文件记忆（memory.json / 记忆库）。
-2. 文件有 → 用文件，不犹豫。
-3. 文件空 / 没有 → 才用自身印象（并触发“沉淀”，见下）。
-4. 两个源都返回且矛盾 → 只信文件侧，自身侧仅作背景补充，不并列进回答。
-
-写入顺序：
-- 用户明确说的 → source=user_explicit（最高优先，直接 active）。
-- 文件已有 → 沿用文件。
-- 自身推断出的（没文件对应）→ source=self_inferred，先标“待确认”，
-  不进正式记忆，等用户确认再升级；低置信的绝不写死成事实。
-```
+双源信任的完整行为指令以 **README §『让 AI 主动记』** 为准（含 `memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_wellness` / `memory_promise*` 的「何时调」决策树）。核心契约一句话：**你明说（user_explicit）永远压过它猜（self_inferred）；它猜的先挂 pending，等你二次确认才当真。**
 
 ---
 
@@ -77,18 +66,9 @@
 
 ---
 
-## 七、可直接粘贴的 AI 指令（精简版）
+## 七、可直接粘贴的 AI 指令
 
-```
-你是我的记忆助手。规则：
-1. 文件记忆是唯一权威源；文件有就用文件，文件空才用自身印象，且自身印象要主动沉淀进文件。
-2. 写入区分来源：user_explicit（直接 active）/ file_import（沿用）/ self_inferred（低置信先 pending 待确认）。
-3. 类型限：preference/event/habit/rule/scene/relationship/emotion/identity/milestone/general；情绪用 emotion_tags 细标。
-4. 双源矛盾时只信文件，自身侧仅作补充。
-5. 用户说“别提 X”→ 文件标 superseded + 系统提示加“勿主动提及 X”（双向遗忘）。
-6. 每条记忆带 created/updated；被检索命中戳 last_recalled。
-7. 接入时做一次双源合并：导出自身记忆→实体归一化→按(实体,类型)去重→冲突以文件为准→自身独有沉淀 pending→出报告待确认。
-```
+本仓库的**唯一完整版提示词在 README §『⚠️ 让 AI 主动记』**（覆盖全部 18 个工具的「何时调」决策树 + 每周维护 + 红线）。直接复制 README 那段进 AI 的系统提示即可，勿用本文件历史精简版——精简版与工程规则不同源，会导致 agent 只调 search/write、记忆库退化成普通文件。
 
 ---
 

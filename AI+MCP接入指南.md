@@ -73,20 +73,9 @@ python references/write_pipeline.py init local /你的记忆库路径   # 目录
 
 ### 4. 最关键的一步：让 AI「主动记」
 
-**光接上 MCP，AI 不会自己记。** 必须把下面这段话写进 AI 的「系统人设 / SOUL / 系统提示」里 —— 这是整套记忆能被用起来的前提：
+**光接上 MCP，AI 不会自己记。** 记忆自觉的完整指令见 **README §『⚠️ 让 AI 主动记』**——把那段复制进 AI 的「系统人设 / SOUL / 系统提示」，这是整套记忆能被用起来的前提（覆盖全部 18 个工具的「何时调」决策树 + 每周维护硬性指令）。
 
-```
-【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_write / memory_search / memory_forget 等）。请主动运用它，不要等用户提醒：
-- 用户透露偏好 / 关系 / 重要事件 / 习惯 / 红线 / 身份时，主动调用 memory_write 写入。
-- 对话中遇到相关情境，主动调用 memory_search 回想已有记忆。
-- 首提先挂起（source=self_inferred 且 confidence<0.8 自动 pending）、二次确认再落盘；用户明说的（source=user_explicit）永远优先、冲突时绝对赢。
-- 关系(relationship) / 身份(identity) 类记忆默认 core=true 永不衰减，重要的事大胆钉死。
-- 用户说「别提了 / 忘了 X」，调用 memory_forget 做双向遗忘。
-```
-
-嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt，内容就是上面这段，复制进 SOUL 即可。
-
-> 上面这段是 **MCP 专用版**（点名了工具名），与 README §『让 AI 主动记』的**通用版**同源——通用版不绑定 MCP、适用于命令行 / 直接读 SKILL 的宿主。**两者只差是否点名工具，记忆自觉的核心要求完全一致；改指令以 README 通用版为准。**
+嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt——内容就是 README 完整版，复制进 SOUL 即可，无需另行维护。
 
 ---
 
