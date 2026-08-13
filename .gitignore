@@ -11,6 +11,8 @@ references/.archive/
 references/.lock
 references/.export/
 references/.DS_Store
+references/.promise_reminders.md
+references/.promise_notified.json
 .DS_Store
 
 # Python 编译产物（v2.8.0 amend: 修复误提交的 __pycache__/*.pyc）

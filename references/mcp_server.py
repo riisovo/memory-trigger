@@ -51,6 +51,30 @@ mcp = FastMCP("memory-trigger")
 # write_pipeline 内部已用 flock 防并发；这里再兜一层，避免同进程内 stdout 互相串。
 _print_lock = threading.Lock()
 
+# === v2.10 承诺闹钟：MCP server 常驻即自动巡检承诺（不依赖宿主 cron） ===
+_promise_watch_stop = threading.Event()
+_promise_watch_log = []
+
+
+def _promise_watch_loop():
+    """后台线程：每隔一段时间跑一次 promise_notify_due，临期/逾期承诺去重推送（Bark/webhook/落盘）。
+    MCP server 常驻期间该线程一直活着——这就是模板自带的"闹钟"，无需宿主配任何定时任务。
+    安静失败，绝不打断 MCP 主流程；进度写进 _promise_watch_log 供 memory_promise_watch_status 读取。"""
+    interval = getattr(wp, "PROMISE_WATCH_INTERVAL", 300)
+    try:
+        interval = int(os.environ.get("MEMORY_TRIGGER_WATCH_INTERVAL") or interval)
+    except (TypeError, ValueError):
+        pass
+    while not _promise_watch_stop.wait(interval):
+        refs = os.environ.get("MEMORY_TRIGGER_REFS_DIR") or _HERE
+        try:
+            pushed = wp.promise_notify_due(refs)
+            if pushed:
+                _promise_watch_log.append("promise_watch pushed reminders")
+        except Exception as e:
+            sys.stderr.write(f"[promise_watch] {type(e).__name__}: {e}\n")
+
+
 
 # === v2.8.2 存量防线：每个记忆目录首次使用时自愈一次缺 entity 的旧记录（memoize，绝不阻断正常调用） ===
 _selfchecked: set = set()
@@ -91,16 +115,25 @@ def _call(fn, *args, **kwargs) -> dict:
         raw = buf.getvalue().strip()
         if raw:
             try:
-                return json.loads(raw)
+                result = json.loads(raw)
             except json.JSONDecodeError:
-                return {"raw": raw}
+                result = {"raw": raw}
         # === 修复 (finding #2) === cmd_selfcheck 等只读体检函数不 print JSON，
         # 而是直接 return 摘要 dict；此前 _call 只捕获 stdout，导致 memory_selfcheck
         # 永远只回 {"status":"ok"}，把真正的修复摘要吞掉。这里在无打印输出时
         # 回退到函数的返回值，让体检摘要能被 MCP 工具正常透出。
-        if result is not None:
-            return result
-        return {"status": "ok"}
+        if result is None:
+            result = {"status": "ok"}
+        # === v2.10 会话内注入 === 有临期/逾期承诺时附加提醒字段，
+        # 让 AI 每次调任何工具都"撞见"承诺（无需宿主配 cron）。不推送、不改原结果。
+        try:
+            refs = _resolve_refs("", skip_selfcheck=True)
+            extra = wp._promise_reminders_field(refs)
+            if extra and isinstance(result, dict):
+                result = {**result, **extra}
+        except Exception:
+            pass
+        return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -264,7 +297,7 @@ def memory_init(mode: str = "local", refs_dir: str = "") -> str:
 def remember_guidance() -> str:
     """返回应写入 AI「系统人设 / SOUL」的记忆自觉指令片段。复制此内容到你的 SOUL，AI 才会主动调用全部记忆工具（否则只调 search/write，记忆库退化成普通文件，遗忘/健康机制形同虚设）。"""
     return (
-        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 18 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。"
+        "【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 19 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。"
         "\n"
         ""
         "\n"
@@ -282,7 +315,7 @@ def remember_guidance() -> str:
         "\n"
         "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。"
         "\n"
-        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。"
+        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。"
         "\n"
         ""
         "\n"
@@ -300,7 +333,7 @@ def remember_guidance() -> str:
         "\n"
         "5) memory_expire_check —— 到期记忆检查：过期的移出检索，临期的提醒兑现。"
         "\n"
-        "6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。"
+        "6) memory_promise_check —— 主动戳未完成的承诺，逾期排最前；把欠账推给主人（Bark），兑现后记得 done。**注意：这是每周兜底，不是唯一提醒源**——v2.10 起承诺提醒由「模板自带闹钟」负责（见上方承诺铁律：MCP 后台线程 / `promise watch` / 会话内注入），带 deadline 的承诺不等每周定时也会被主动戳到。每周这步用于清理积压、周报汇总。"
         "\n"
         "7) memory_backup —— 维护前先备一份兜底（正常写入已自动备份，手动跑一次更稳）。"
         "\n"
@@ -326,5 +359,34 @@ def remember_guidance() -> str:
     )
 
 
+
+@mcp.tool()
+def memory_promise_watch_status(refs_dir: str = "") -> str:
+    """查看承诺闹钟（promise_watch）后台线程的运行状态：是否已启动、检查间隔、最近一次是否推送过提醒。"""
+    refs = _resolve_refs(refs_dir)
+    running = _promise_watch_th.is_alive() if _promise_watch_th is not None else False
+    interval = os.environ.get("MEMORY_TRIGGER_WATCH_INTERVAL") or getattr(wp, "PROMISE_WATCH_INTERVAL", 300)
+    return json.dumps({
+        "status": "promise_watch_info",
+        "running": running,
+        "interval_sec": interval,
+        "refs_dir": refs,
+        "last_log": _promise_watch_log[-5:],
+    }, ensure_ascii=False)
+
+
+_promise_watch_th = None
+
+
+def _maybe_start_promise_watch():
+    global _promise_watch_th
+    if _promise_watch_th is not None and _promise_watch_th.is_alive():
+        return
+    _promise_watch_th = threading.Thread(target=_promise_watch_loop, daemon=True, name="promise_watch")
+    _promise_watch_th.start()
+
+
 if __name__ == "__main__":
+    # MCP server 常驻即自动启动承诺闹钟后台线程（模板自带提醒，不依赖宿主 cron）
+    _maybe_start_promise_watch()
     mcp.run()

@@ -1589,6 +1589,207 @@ def cmd_promise_check(refs_dir):
     }, ensure_ascii=False, indent=2))
 
 
+# === v2.10 承诺闹钟：promise + deadline 自触发提醒（不依赖宿主 cron） ===
+# 三种触发：① MCP server 内置后台线程（mcp_server.py 常驻时自动跑）
+#           ② CLI `promise watch` 常驻子命令（零依赖，nohup 挂后台）
+#           ③ 会话内注入：任何工具/命令返回时附上临期/逾期承诺（memory_promise_check 与
+#              各 cmd_* 会自动附加 promise_reminders 字段），宿主每次唤醒 AI 都能撞见。
+# 推送渠道：Bark（BARK_KEY 环境变量或 refs 目录 .bark_key 文件）/ 自定义 webhook
+#           （MEMORY_TRIGGER_WEBHOOK_URL 环境变量）/ 落盘 .promise_reminders.md（默认，保证无网络也能留痕）。
+PROMISE_REMIND_DAYS = 1              # 临期窗口：deadline 距今天 ≤ 该天数视为"临期"，与到期记忆 EXPIRY_REMIND_DAYS 对齐
+PROMISE_WATCH_INTERVAL = 300         # 后台线程/常驻 watch 的默认检查间隔（秒）
+PROMISE_NOTIFY_FILE = ".promise_notified.json"   # 已通知记录，防重复轰炸
+
+
+def _promise_notify_path(refs_dir):
+    return os.path.join(refs_dir, PROMISE_NOTIFY_FILE)
+
+
+def _read_promise_notified(refs_dir):
+    p = _promise_notify_path(refs_dir)
+    data = safe_read_json(p)
+    return data if isinstance(data, dict) else {}
+
+
+def _write_promise_notified(refs_dir, data):
+    safe_write_json(_promise_notify_path(refs_dir), data)
+
+
+def _promise_due_items(refs_dir):
+    """返回需要提醒的承诺：open 且（deadline 已逾期 或 deadline 在临期窗口内）。
+    无 deadline 的承诺不在这里——提醒必须靠 deadline 这把尺子（见 README「承诺依赖 deadline」）。"""
+    now = datetime.now(TZ)
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    due = []
+    data = _read_promises(refs_dir)
+    for p in data.get("promises", []):
+        if not isinstance(p, dict):
+            continue
+        if p.get("status") != "open":
+            continue
+        text = _safe_str(p.get("text"))
+        deadline = p.get("deadline")
+        if not deadline:
+            continue
+        try:
+            d = ts_parse(deadline)
+        except (ValueError, TypeError):
+            continue
+        # 逾期：deadline < now；临期：deadline 落在今天到 remind 窗口之间
+        remind_from = today0 - timedelta(days=PROMISE_REMIND_DAYS)
+        if d < remind_from:
+            continue
+        overdue = d < now
+        due.append({
+            "id": p.get("id"),
+            "text": text,
+            "deadline": deadline,
+            "overdue": overdue,
+            "days_overdue": round((now - d).total_seconds() / 86400.0, 1) if overdue else 0,
+        })
+    return due
+
+
+def _send_bark(title, body):
+    """Bark 原生推送：key 取环境变量 BARK_KEY，其次 refs_dir/.bark_key（在调用方补）。返回 bool。"""
+    key = os.environ.get("BARK_KEY") or os.environ.get("MEMORY_TRIGGER_BARK_KEY")
+    if not key:
+        return False
+    try:
+        from urllib.request import urlopen, Request
+        import urllib.parse
+        url = f"https://api.day.app/{key}/{urllib.parse.quote(title)}/{urllib.parse.quote(body)}"
+        req = Request(url, method="GET")
+        try:
+            with urlopen(req, timeout=10) as resp:
+                resp.read()
+        except Exception as ssl_err:
+            # 部分环境（系统 python 缺 CA 证书）SSL 校验失败；个人通知场景降级为不校验，
+            # 让 Bark 能送出去——失败仍有落盘文件兜底，不静默吞掉推送能力。
+            ctx = _unverified_ssl_context()
+            if ctx is None:
+                raise ssl_err
+            with urlopen(req, timeout=10, context=ctx) as resp:
+                resp.read()
+        return True
+    except Exception:
+        return False
+
+
+def _unverified_ssl_context():
+    try:
+        import ssl
+        return ssl._create_unverified_context()
+    except Exception:
+        return None
+
+
+def _send_webhook(title, body):
+    """自定义 webhook：环境变量 MEMORY_TRIGGER_WEBHOOK_URL。POST JSON，兼容 Bark 服务端格式。"""
+    url = os.environ.get("MEMORY_TRIGGER_WEBHOOK_URL")
+    if not url:
+        return False
+    try:
+        from urllib.request import urlopen, Request
+        payload = json.dumps({"title": title, "body": body, "device_key": None}).encode("utf-8")
+        req = Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(req, timeout=10) as resp:
+                resp.read()
+        except Exception as ssl_err:
+            ctx = _unverified_ssl_context()
+            if ctx is None:
+                raise ssl_err
+            with urlopen(req, timeout=10, context=ctx) as resp:
+                resp.read()
+        return True
+    except Exception:
+        return False
+
+
+def _append_promise_reminder_file(refs_dir, items):
+    """落盘 .promise_reminders.md：无网络环境也能留痕，宿主或人可自行读取。"""
+    path = os.path.join(refs_dir, ".promise_reminders.md")
+    try:
+        now = ts_now()
+        lines = [f"# 承诺提醒（{now}）", ""]
+        for it in items:
+            tag = "逾期" if it.get("overdue") else "临期"
+            lines.append(f"- [{tag}]（{it.get('deadline')}）{it.get('text')}")
+        lines.append("")
+        lines.append("> 由 memory-trigger 承诺闹钟生成。兑现后请 promise done <id>，下次巡检不再提醒。")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return path
+    except Exception:
+        return None
+
+
+def promise_notify_due(refs_dir):
+    """检查临期/逾期承诺，去重后推送一次。返回本次是否推送了新提醒。
+
+    被三处调用：CLI `promise watch` 循环、MCP server 后台线程、会话注入路径（附加提醒字段时不推送）。
+    """
+    items = _promise_due_items(refs_dir)
+    if not items:
+        return False
+    notified = _read_promise_notified(refs_dir)
+    ids = notified.get("promise_ids")
+    if not isinstance(ids, list):
+        ids = []
+    fresh = [it for it in items if it["id"] not in ids]
+    if not fresh:
+        return False
+    overdue = [it for it in fresh if it["overdue"]]
+    soon = [it for it in fresh if not it["overdue"]]
+    title = "memory-trigger：承诺需要兑现"
+    lines = []
+    if overdue:
+        lines.append("【已逾期】")
+        lines += [f"· {it['text']}（deadline {it['deadline']}，已过 {it['days_overdue']} 天）" for it in overdue]
+    if soon:
+        lines.append("【临期】")
+        lines += [f"· {it['text']}（deadline {it['deadline']}）" for it in soon]
+    body = "\n".join(lines)
+    bark_ok = _send_bark(title, body)
+    webhook_ok = _send_webhook(title, body)
+    file_path = _append_promise_reminder_file(refs_dir, fresh)
+    # 无论推送是否成功，都标记为已通知，避免每轮重复轰炸；文件落盘兜底保证留痕
+    notified["promise_ids"] = list(dict.fromkeys(ids + [it["id"] for it in fresh]))
+    _write_promise_notified(refs_dir, notified)
+    return True
+
+
+def cmd_promise_watch(refs_dir, interval=None):
+    """=== v2.10 承诺闹钟（常驻）=== `python write_pipeline.py promise watch [refs_dir] [--interval N]`
+
+    常驻循环：每隔 interval 秒检查一次临期/逾期承诺，去重推送（Bark/webhook/落盘）。
+    不依赖宿主 cron——本进程活着，闹钟就活着；配合 MCP server 后台线程双保险。
+    零依赖（纯标准库），nohup 挂后台即可：
+        nohup python3 references/write_pipeline.py promise watch <REFS_DIR> &
+    """
+    if interval is None:
+        interval = PROMISE_WATCH_INTERVAL
+    print(json.dumps({"status": "promise_watch_started", "refs_dir": refs_dir,
+                      "interval_sec": interval}, ensure_ascii=False))
+    while True:
+        try:
+            promise_notify_due(refs_dir)
+        except Exception as e:
+            print(json.dumps({"status": "promise_watch_error", "error": str(e)}, ensure_ascii=False),
+                  file=sys.stderr)
+        time.sleep(max(1, int(interval)))
+
+
+def _promise_reminders_field(refs_dir):
+    """会话内注入用：返回 {promise_reminders: [...]}，有临期/逾期承诺时附加到工具输出。
+    不推送、不标记已通知——只让 AI/宿主每次唤醒都看得见。"""
+    items = _promise_due_items(refs_dir)
+    if not items:
+        return {}
+    return {"promise_reminders": items}
+
+
 def _unsuppress_entity(refs_dir, entity):
     """=== PATCH v2.8.3 (3.4b) === 把某实体从"已遗忘清单"里摘掉并重生成 prompt。
 
@@ -2049,8 +2250,21 @@ def main():
                 cmd_promise_list(refs_dir)
             elif sub == "check":
                 cmd_promise_check(refs_dir)
+            elif sub == "watch":
+                interval = PROMISE_WATCH_INTERVAL
+                i = 0
+                while i < len(sub_args):
+                    if sub_args[i] == "--interval" and i + 1 < len(sub_args):
+                        try:
+                            interval = max(1, int(sub_args[i + 1]))
+                        except ValueError:
+                            pass
+                        i += 2
+                    else:
+                        i += 1
+                cmd_promise_watch(refs_dir, interval)
             else:
-                print(json.dumps({"error": f"未知 promise 子命令: {sub}（add/done/list/check）"}), file=sys.stderr)
+                print(json.dumps({"error": f"未知 promise 子命令: {sub}（add/done/list/check/watch）"}), file=sys.stderr)
                 sys.exit(1)
         elif cmd == "init":
             if not args:
