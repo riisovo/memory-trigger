@@ -73,7 +73,7 @@ python references/write_pipeline.py init local /你的记忆库路径   # 目录
 
 ### 4. 最关键的一步：让 AI「主动记」
 
-**光接上 MCP，AI 不会自己记。** 记忆自觉的完整指令见 **README §『⚠️ 让 AI 主动记』**——把那段复制进 AI 的「系统人设 / SOUL / 系统提示」，这是整套记忆能被用起来的前提（覆盖全部 18 个工具的「何时调」决策树 + 每周维护硬性指令）。
+**光接上 MCP，AI 不会自己记。** 记忆自觉的完整指令见 **README §『⚠️ 让 AI 主动记』**——把那段复制进 AI 的「系统人设 / SOUL / 系统提示」，这是整套记忆能被用起来的前提（覆盖全部 19 个工具的「何时调」决策树 + 每周维护硬性指令）。
 
 嫌手抄麻烦？让 AI 直接拉取 MCP 暴露的 `remember_guidance` Prompt——内容就是 README 完整版，复制进 SOUL 即可，无需另行维护。
 
@@ -88,7 +88,7 @@ cd references && python3 verify_mcp_stdio.py
 # 或指定解释器：MT_PYTHON=/你的python路径 python3 verify_mcp_stdio.py
 ```
 
-它会真拉起 server 子进程、走完整 stdio 握手，验证 18 个工具 + 1 个 Prompt + 双源信任闭环。
+它会真拉起 server 子进程、走完整 stdio 握手，验证 19 个工具 + 1 个 Prompt + 双源信任闭环。
 
 ---
 
@@ -101,9 +101,33 @@ cd references && python3 verify_mcp_stdio.py
 
 ---
 
-## 接上后 AI 能调的 18 个工具
+## 接上后 AI 能调的 19 个工具
 
-`memory_write` / `memory_search` / `memory_recall` / `memory_forget` / `memory_deny` / `memory_stats` / `memory_decay` / `memory_expire_check` / `memory_vacuum` / `memory_backup` / `memory_selfcheck` / `memory_recover` / `memory_wellness` / `memory_promise` / `memory_promise_done` / `memory_promise_list` / `memory_promise_check` / `memory_init` —— 具体行为见 SKILL.md（v2.9 新增 `memory_recall` 主动回忆 / `memory_deny` 否认降权 / `memory_expire_check` 到期记忆 / `memory_promise*` 承诺追踪）。
+每个工具一句话说明（完整行为见 SKILL.md）：
+
+| 工具 | 一句话 |
+|---|---|
+| `memory_write` | 写入/更新一条记忆；可带 `context`（当时的气氛）、`expires_at`（到期时间）、`core`、`emotion_tags` |
+| `memory_search` | 关键词检索旧记忆；命中即触发遗忘衰减（戳 last_recalled + 降权重） |
+| `memory_recall` | 主动回忆：挑出「此刻值得想起的」旧记忆（双通道，带当时的气氛 + `recall_reason`） |
+| `memory_forget` | 双向遗忘：你说「别提了」，标 superseded + suppressed，AI 也放下 |
+| `memory_deny` | 否认降权：你纠正过的事立即大幅降权；否认 2 次自动转 pending 退出检索 |
+| `memory_wellness` | 记录心情 / 睡眠 / 状态（mood 必填） |
+| `memory_promise` | 承诺建档（AI 答应的事立即建档；有期限务必传 `deadline`） |
+| `memory_promise_done` | 承诺完成划掉 |
+| `memory_promise_list` | 承诺清单（未完成在前、标逾期） |
+| `memory_promise_check` | 主动戳未完成承诺（逾期排最前），每次会话开始自查一次 |
+| `memory_promise_watch_status` | （v2.10）查看承诺闹钟后台线程状态与最近推送记录 |
+| `memory_decay` | （每周）遗忘衰减：非 core 记忆统一按艾宾浩斯曲线降权 |
+| `memory_expire_check` | （每周）到期记忆：过期的移出检索，临期的提醒兑现 |
+| `memory_vacuum` | （每周）归档 >90 天前 superseded 的旧记忆，主库瘦身 |
+| `memory_stats` | （每周）体检：核心数 / 均权重 / 最弱 5 / 最久未提，结果推主人 |
+| `memory_selfcheck` | （每周）扫缺 entity 的旧脏记录并自愈 |
+| `memory_backup` | 备份 memory.json / entity_index.json（维护前 / 大改前） |
+| `memory_recover` | 异常恢复：从 WAL 重放未提交项 |
+| `memory_init` | 首次部署建库 |
+
+> v2.10 新增：`memory_promise_watch_status` + 承诺闹钟（带 deadline 的承诺，MCP 后台线程 / `promise watch` / 会话内注入 `promise_reminders` 三通道自触发，不依赖宿主 cron）。
 
 ---
 
