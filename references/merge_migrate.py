@@ -190,6 +190,7 @@ def main():
             report["file_invalid"].append({"entity": ent, "reason": reason})
         if e.get("status", "active") == "active":
             file_index[(ent, kind)] = e
+        e.setdefault("status", "active")
         merged.append(e)
         report["kept_file"] += 1
 
