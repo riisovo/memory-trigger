@@ -635,7 +635,7 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                 continue  # 脏数据（字符串/数字混入）跳过，不让它毒死整条写入链
             e_kind = entry.get("kind") or entry.get("type")
             if entry.get("entity") == entity and e_kind == kind:
-                if entry.get("status") == "active":
+                if _norm_status(entry) == "active":
                     old_val = _safe_str(entry.get("value", ""))
                     if len(old_val) > 0 and old_val == value:
                         similar_idx = i
@@ -853,7 +853,7 @@ def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
         for e in memory:
             if not isinstance(e, dict):
                 continue
-            if e.get("id") in hit and e.get("status") == "active":
+            if e.get("id") in hit and _norm_status(e) == "active":
                 if not _is_core(e):
                     days = _days_since(e, now)
                     cur = _safe_float(e.get("importance", 1.0), 1.0)
@@ -905,7 +905,7 @@ def cmd_search(query, refs_dir):
                 if not isinstance(entry, dict):
                     continue
                 # === PATCH v2.6 B1 === 只回 active；pending/superseded 不进检索（防幻觉固化/已遗忘漏网）
-                if entry.get("id") == mid and entry.get("entity") == query and entry.get("status") == "active":
+                if entry.get("id") == mid and entry.get("entity") == query and _norm_status(entry) == "active":
                     results.append({
                         "source": "entity_index",
                         "confidence": 0.95,
@@ -919,7 +919,7 @@ def cmd_search(query, refs_dir):
         # KeyError / AttributeError 崩掉，一条脏记录就让整个检索不可用。
         if not isinstance(entry, dict):
             continue
-        if entry.get("status") != "active":
+        if _norm_status(entry) != "active":
             continue
         val = _safe_str(entry.get("value", "")).lower()
         ent_name = _safe_str(entry.get("entity", "")).lower()
@@ -974,6 +974,14 @@ def cmd_search(query, refs_dir):
 
 
 # === v2.8.2 存量防线：扫描并自愈缺 entity 的旧记录 ===
+
+def _norm_status(e):
+    """读路径 status 归一：缺省/空 -> active（向后兼容 v2.9 前无 status 字段的存量库）。
+    已带 status 的（active / denied / pending / superseded / confirmed / ...）原样保留，不改变原语义。"""
+    st = e.get("status") if isinstance(e, dict) else None
+    return st or "active"
+
+
 def cmd_selfcheck(refs_dir):
     """扫描 memory.json，修复 entity 缺失/为空的旧记录（早期手写入库、entity 尚未必填时留下）。
     对缺 entity 的记录按 value 首行派生实体名自动补全（value 也为空则记为 '(未知实体)'），
@@ -988,6 +996,7 @@ def cmd_selfcheck(refs_dir):
     for entry in memory:
         if not isinstance(entry, dict):
             continue
+        changed = False
         ent = entry.get("entity")
         if not ent or not str(ent).strip():
             val = _safe_str(entry.get("value") or "").strip()
@@ -1003,6 +1012,17 @@ def cmd_selfcheck(refs_dir):
                 f"[memory_selfcheck] 修复缺 entity 记录 id={entry.get('id')} "
                 f"(kind={kind}, source={entry.get('source')}) -> entity='{derived}'\n"
             )
+            changed = True
+        # 存量库兼容：status 缺失/空 -> active（v2.9 前写入的记录无该字段）
+        # 注意：显式 denied/pending/superseded/confirmed 等原值保留，不覆盖
+        st = entry.get("status")
+        if not st:
+            entry["status"] = "active"
+            changed = True
+        if changed and not any(f.get("id") == entry.get("id") for f in fixed):
+            kind = entry.get("kind") or entry.get("type")
+            fixed.append({"id": entry.get("id"), "kind": kind, "source": entry.get("source"),
+                          "entity": entry.get("entity"), "status_fixed": True})
 
     if fixed:
         backup_files(refs_dir)
@@ -1023,7 +1043,7 @@ def cmd_stats(refs_dir):
     confirmed = sum(1 for e in entities.values() if e.get("status") == "confirmed")
     pending = sum(1 for e in entities.values() if e.get("status") == "pending")
     superseded = sum(1 for m in memory if m.get("status") == "superseded")
-    active = sum(1 for m in memory if m.get("status") == "active")
+    active = sum(1 for m in memory if _norm_status(m) == "active")
     pending_mem = sum(1 for m in memory if m.get("status") == "pending")
 
     type_counts = {}
@@ -1033,8 +1053,8 @@ def cmd_stats(refs_dir):
 
     # === PATCH v2.7 C2/C3 === 核心记忆 / 平均权重 / 最弱记忆排行
     now = datetime.now(TZ)
-    core_count = sum(1 for m in memory if m.get("status") == "active" and _is_core(m))
-    noncore = [m for m in memory if m.get("status") == "active" and not _is_core(m)]
+    core_count = sum(1 for m in memory if _norm_status(m) == "active" and _is_core(m))
+    noncore = [m for m in memory if _norm_status(m) == "active" and not _is_core(m)]
     avg_imp = round(sum(effective_importance(m, now) for m in noncore) / len(noncore), 4) if noncore else 0
     weakest = sorted(
         [(m.get("entity"), m.get("kind"), round(effective_importance(m, now), 4)) for m in noncore],
@@ -1046,7 +1066,7 @@ def cmd_stats(refs_dir):
     # === PATCH v2.6 A3 === 最久未召回排行（last_recalled 为空退回 created）
     stale = []
     for m in memory:
-        if m.get("status") != "active":
+        if _norm_status(m) != "active":
             continue
         ref = m.get("last_recalled") or m.get("created")
         try:
@@ -1087,7 +1107,7 @@ def cmd_decay(refs_dir):
         for e in memory:
             if not isinstance(e, dict):
                 continue
-            if e.get("status") != "active" or _is_core(e):
+            if _norm_status(e) != "active" or _is_core(e):
                 continue
             days = _days_since(e, now)
             # === PATCH v2.8.3 === importance 脏值（null / "高"）不再让整库 decay 崩溃
@@ -1103,7 +1123,7 @@ def cmd_decay(refs_dir):
         "status": "decayed",
         "decayed_count": decayed,
         "active_noncore": sum(1 for m in memory
-                              if isinstance(m, dict) and m.get("status") == "active" and not _is_core(m)),
+                              if isinstance(m, dict) and _norm_status(m) == "active" and not _is_core(m)),
     }, ensure_ascii=False))
 
 
@@ -1178,7 +1198,7 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
         for e in memory:
             if not isinstance(e, dict):
                 continue
-            if e.get("status") != "active":
+            if _norm_status(e) != "active":
                 continue
             match = (e.get("id") == entity_or_id) or (e.get("entity") == entity_or_id)
             if kind:
@@ -1253,7 +1273,7 @@ def cmd_deny(entity_or_id, refs_dir, reason=None):
         for e in memory:
             if not isinstance(e, dict):
                 continue
-            if e.get("status") != "active":
+            if _norm_status(e) != "active":
                 continue
             match = (e.get("id") == entity_or_id) or (e.get("entity") == entity_or_id)
             if not match:
@@ -1306,7 +1326,7 @@ def cmd_expire_check(refs_dir):
         for e in memory:
             if not isinstance(e, dict):
                 continue
-            if e.get("status") != "active":
+            if _norm_status(e) != "active":
                 continue
             raw = e.get("expires_at")
             if not raw or not isinstance(raw, str):
@@ -1366,7 +1386,7 @@ def cmd_recall(refs_dir, limit=3):
     for e in memory:
         if not isinstance(e, dict):
             continue
-        if e.get("status") != "active":
+        if _norm_status(e) != "active":
             continue
         imp = effective_importance(e, now)
         never = not e.get("last_recalled")

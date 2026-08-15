@@ -165,9 +165,31 @@ def main():
     print("\n--- 4. 检索状态过滤 ---")
     # search 里必须只返回 status==active，避免 pending/superseded 泄漏
     has_active_filter = re.search(r'status"\)\s*==\s*"active"', wp_src) or \
-                        re.search(r"get\(.status.\)\s*!=\s*.active.", wp_src)
+                        re.search(r"get\(.status.\)\s*!=\s*.active.", wp_src) or \
+                        re.search(r"_norm_status\(", wp_src)
     check("cmd_search 过滤 status==active（pending/superseded 不泄漏）",
           bool(has_active_filter))
+
+    # 4b. 存量库（无 status 字段）向后兼容：真跑一遍，确认不会被判成哑库
+    try:
+        import subprocess as _sp, tempfile as _tf
+        _tmp = _tf.mkdtemp()
+        _refs = os.path.join(_tmp, "references")
+        os.makedirs(_refs)
+        _legacy = [
+            {"id": "l1", "entity": "奶茶", "kind": "preference", "value": "一点点无糖加茶冻", "source": "user_stated"},
+            {"id": "l2", "entity": "桔梗", "kind": "preference", "value": "白桔梗", "source": "user_stated"},
+        ]
+        json.dump(_legacy, open(os.path.join(_refs, "memory.json"), "w"), ensure_ascii=False)
+        _wp = os.path.join(os.path.dirname(wp), "write_pipeline.py") if os.path.isfile(os.path.join(os.path.dirname(wp), "write_pipeline.py")) else wp
+        _r = _sp.run([sys.executable, _wp, "stats", _refs], capture_output=True, text=True)
+        _m = re.search(r'"active":\s*(\d+)', _r.stdout)
+        _ok = bool(_m) and int(_m.group(1)) >= 2
+        check("存量库（无 status 字段）stats 不哑库（active>=2）", _ok,
+              level="WARN", detail=(_r.stdout + _r.stderr)[:300] if not _ok else "")
+    except Exception as _e:  # noqa
+        check("存量库（无 status 字段）stats 不哑库（active>=2）", False, level="WARN",
+              detail=f"运行时检查异常: {_e}")
 
     # ---- 5. 锁反模式 ----
     print("\n--- 5. 并发锁 ---")
