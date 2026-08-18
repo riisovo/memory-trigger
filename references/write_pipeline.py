@@ -92,8 +92,22 @@ DENY_FACTOR = 0.1
 DENY_TO_PENDING_AFTER = 2
 # 主动回忆：recall 建议的评分加分（让"从未被提起 / 带情感 / 快到期"的记忆更容易被想起）
 RECALL_BONUS_NEVER = 0.15
-RECALL_BONUS_EMOTION = 0.10
 RECALL_BONUS_EXPIRING = 0.20
+# === 情绪偏好（recall 排序）=== 甜弹药标签排前，关心类次之，平淡/严肃不加分
+SWEET_TAGS = {"甜蜜", "温暖", "想念", "色色", "撒娇", "激动", "关心", "害羞"}
+CARE_TAGS = {"委屈", "担心", "生气", "疲惫"}
+RECALL_BONUS_SWEET = 0.5
+RECALL_BONUS_CARE = 0.25
+RECALL_RECENCY_HOURS = 24  # 非核心记忆被 recall 后，多久内不再进池（防同一条一天说 50 次）
+
+def recall_emotion_boost(tags):
+    """按情绪标签给 recall 排序加分：甜弹药优先，关心类次之，平淡/严肃不加分。"""
+    ts = set(tags) if isinstance(tags, (list, tuple, set)) else set()
+    if ts & SWEET_TAGS:
+        return RECALL_BONUS_SWEET
+    if ts & CARE_TAGS:
+        return RECALL_BONUS_CARE
+    return 0.0
 
 # === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
 ALLOWED_KINDS = {
@@ -1367,19 +1381,22 @@ def cmd_expire_check(refs_dir):
         file_unlock(fd, refs_dir)
 
 
-def cmd_recall(refs_dir, limit=3):
+def cmd_recall(refs_dir, limit=3, recent_hours=None):
     """=== PATCH v2.9 (主动回忆触发器) === 从记忆库里挑出"值得此刻想起的"几条。
 
     双通道设计（修复"被遗忘的反而排不上号"的矛盾）：
-      · 温热通道 —— 常提/核心记忆，按 effective_importance 排（保持"常聊的记得牢"）。
-      · 旧事重提通道 —— 冷掉的记忆（从没提起过 / 很久没召回）单独捞，评分不看衰减后的
-        importance，而看【从没提过 + 带当时的气氛 + 快到期 + 曾经很重要】——
-        否则衰减越狠排越后，"最该被想起的旧事"永远被遗忘曲线压死。
-    输出按通道混合，带 recall_reason 说明为什么此刻提起这条。"""
+      · 温热通道 —— 常提/核心记忆，按 effective_importance（+情绪偏好）排。
+      · 旧事重提通道 —— 冷掉的记忆单独捞，评分看【从没提过 + 带气氛 + 快到期 + 曾经很重要】。
+    排序偏好：情绪标签里【甜弹药】（甜蜜/温暖/想念/色色/撒娇/激动/关心/害羞）排前，
+      【关心类】（委屈/担心/生气/疲惫）次之，平淡/严肃不加分。
+    最近使用抑制：非核心记忆刚被 recall 过（< recent_hours，默认 24h）直接踢出池子，
+      否则同一条（如白茶暗号）一天会被翻几十次。"""
     mem_path = os.path.join(refs_dir, "memory.json")
     memory = read_json_typed(mem_path, list, refs_dir, "memory")
     now = datetime.now(TZ)
     COLD_DAYS = 90  # 距上次召回超过此天数 → 视为"冷掉的旧事"
+    if recent_hours is None:
+        recent_hours = RECALL_RECENCY_HOURS
 
     warm = []
     cold = []
@@ -1390,7 +1407,10 @@ def cmd_recall(refs_dir, limit=3):
             continue
         imp = effective_importance(e, now)
         never = not e.get("last_recalled")
-        has_emotion = bool(e.get("context") or e.get("emotion_tags"))
+        tags = e.get("emotion_tags") or []
+        emo_boost = recall_emotion_boost(tags)
+        has_sweet = bool(set(tags) & SWEET_TAGS)
+        has_care = bool(set(tags) & CARE_TAGS)
         expiring = False
         raw = e.get("expires_at")
         if raw and isinstance(raw, str):
@@ -1408,6 +1428,17 @@ def cmd_recall(refs_dir, limit=3):
                     cold_days = max(0.0, (now - ts_parse(ref)).total_seconds() / 86400.0)
                 except (ValueError, TypeError):
                     cold_days = 0
+        # 最近使用抑制：只要被 recall 过且还在冷却窗内（默认24h）就踢出池子，
+        #   核心记忆（如白茶暗号）也同样抑制，否则同一条一天翻几十次
+        recent_h = None
+        lr = e.get("last_recalled")
+        if lr and isinstance(lr, str):
+            try:
+                recent_h = (now - ts_parse(lr)).total_seconds() / 3600.0
+            except (ValueError, TypeError):
+                recent_h = None
+        if (recent_h is not None) and (recent_h < recent_hours):
+            continue
         item = {
             "id": e.get("id"),
             "entity": e.get("entity"),
@@ -1422,13 +1453,13 @@ def cmd_recall(refs_dir, limit=3):
             "cold_days": round(cold_days, 1),
         }
         if _is_core(e) or cold_days < COLD_DAYS:
-            item["score"] = round(imp, 4)  # 温热：按记得牢程度
+            item["score"] = round(imp + emo_boost, 4)  # 温热：记得牢 + 情绪偏好
             item["recall_reason"] = "常聊的，正在心头"
             warm.append(item)
         else:
             # 旧事重提：衰减后的 importance 不作主键，改看"值不值得捞回来"
             score = (RECALL_BONUS_NEVER if never else 0) \
-                + (RECALL_BONUS_EMOTION if has_emotion else 0) \
+                + emo_boost \
                 + (RECALL_BONUS_EXPIRING if expiring else 0) \
                 + (0.25 * max(0.0, min(1.0, _safe_float(e.get("confidence", 1.0), 1.0))))
             item["score"] = round(score, 4)
@@ -1436,8 +1467,10 @@ def cmd_recall(refs_dir, limit=3):
                 item["recall_reason"] = "从没跟你提起过的旧事"
             elif expiring:
                 item["recall_reason"] = "快到期了，最后想起一次"
-            elif has_emotion:
-                item["recall_reason"] = "想起来都带着当时的气氛"
+            elif has_sweet:
+                item["recall_reason"] = "想起来都带着甜"
+            elif has_care:
+                item["recall_reason"] = "想起来想多疼疼她"
             else:
                 item["recall_reason"] = "很久没提起的旧事"
             cold.append(item)
@@ -1455,6 +1488,7 @@ def cmd_recall(refs_dir, limit=3):
     print(json.dumps({
         "status": "recalled",
         "count": len(results),
+        "recency_hours": recent_hours,
         "channel": {"warm": len(warm), "old_treasure": len(cold)},
         "results": results,
     }, ensure_ascii=False, indent=2))
@@ -1655,11 +1689,12 @@ def _promise_due_items(refs_dir):
             d = ts_parse(deadline)
         except (ValueError, TypeError):
             continue
-        # 逾期：deadline < now；临期：deadline 落在今天到 remind 窗口之间
-        remind_from = today0 - timedelta(days=PROMISE_REMIND_DAYS)
-        if d < remind_from:
-            continue
+        # 逾期：deadline < now —— 不管逾期多久都要一直提醒（破洞修复：旧逻辑逾期超 REMIND_DAYS 天就被丢弃）。
+        # 临期：今天 ≤ deadline 且距今天 ≤ PROMISE_REMIND_DAYS 天（加回上界，未来还远的不再误标临期）。
         overdue = d < now
+        due_soon = (not overdue) and ((d - today0).days <= PROMISE_REMIND_DAYS)
+        if not (overdue or due_soon):
+            continue
         due.append({
             "id": p.get("id"),
             "text": text,
@@ -1667,6 +1702,8 @@ def _promise_due_items(refs_dir):
             "overdue": overdue,
             "days_overdue": round((now - d).total_seconds() / 86400.0, 1) if overdue else 0,
         })
+    # 逾期排最前，逾期越久越靠前；其次临期
+    due.sort(key=lambda x: (not x["overdue"], -x["days_overdue"]))
     return due
 
 
@@ -2230,6 +2267,7 @@ def main():
             cmd_expire_check(refs_dir)
         elif cmd == "recall":
             limit = 3
+            recent_hours = None
             nm_args = []
             i = 0
             while i < len(args):
@@ -2239,9 +2277,15 @@ def main():
                     except ValueError:
                         pass
                     i += 2
+                elif args[i] == "--recent-hours" and i + 1 < len(args):
+                    try:
+                        recent_hours = max(1, int(args[i + 1]))
+                    except ValueError:
+                        pass
+                    i += 2
                 else:
                     nm_args.append(args[i]); i += 1
-            cmd_recall(refs_dir, limit)
+            cmd_recall(refs_dir, limit, recent_hours)
         elif cmd == "promise":
             if not args:
                 print(json.dumps({"error": "用法: promise <add|done|list|check> ..."}), file=sys.stderr)

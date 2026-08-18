@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.riis.hermes-recall-daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/xiaozuzong/.hermes/agent-hooks/venv/bin/python</string>
+        <string>/Users/xiaozuzong/.hermes/memory-trigger-src/references/recall_daemon.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/xiaozuzong/.hermes/memory-trigger-src/references</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HF_HUB_OFFLINE</key>
+        <string>1</string>
+        <key>HF_HUB_DISABLE_XET</key>
+        <string>1</string>
+        <key>TRANSFORMERS_OFFLINE</key>
+        <string>1</string>
+        <key>RECALL_SOCK</key>
+        <string>/Users/xiaozuzong/.hermes/agent-hooks/recall.sock</string>
+        <key>RECALL_REFS_DIR</key>
+        <string>/Users/xiaozuzong/.hermes/memories/memory-trigger</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/xiaozuzong/.hermes/agent-hooks/recall_daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/xiaozuzong/.hermes/agent-hooks/recall_daemon.err.log</string>
+</dict>
+</plist>
