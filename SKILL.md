@@ -1,10 +1,13 @@
 ---
 name: memory-trigger
 description: 一套「双源记忆 + 人情味层」模板 —— agent 把用户偏好/事件/习惯等写进本地权威文件（memory.json），带核心记忆钉死、遗忘曲线、命中衰减、状态机、双源冲突消解与字段校验。零依赖（纯 python3），clone 即用；想要语义检索/关系时间线可接可选 MCP。适合想给自己 agent 挂一份「不会被上下文压没、还像真人一样有忘有记」的长期记忆时使用。
-version: 2.10.0
+version: 3.1.0
 ---
 
 # memory-trigger —— 双源记忆模板（含人情味层）
+# memory-trigger —— 双源记忆模板（含人情味层）
+
+> **v3.1（2026-08-18）**：新增「主动回忆钩子」（`references/recall_vec.py` / `recall_core.py` / `recall_daemon.py` + `hooks/riis_recall_sense.py`，挂 `pre_llm_call`）——感觉触发（中文向量比冷/热锚点簇，非关键词）+ 向量召回按情绪标签 + 池不重复 + 无时间冷却 + 旧事直接注入当轮消息；承诺执行闭环（每条消息注入逾期承诺，强制执行三选一：做完 / 明确排期重建档 / 销账）。详见 `RECALL.md`。
 
 给 agent 挂一份**本地权威**的长期记忆：用户说的直接写文件，agent 自己的印象只作补充、低置信先挂起，冲突时以文件为准。核心脚本 `references/write_pipeline.py`，迁移/校验用 `references/merge_migrate.py`，双源逻辑自检 `references/test_dual_source.py`。
 

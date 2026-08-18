@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 memory_trigger_mcp.py —— 将 memory-trigger 本地层包装为 MCP Server（stdio 传输）。
+v3.1（2026-08-18）：主动回忆钩子（感觉触发+向量召回+直接注入，详见 RECALL.md）+ 承诺执行闭环
+（build_injection 每条消息注入逾期承诺、强制执行三选一）+ 修复逾期承诺被丢出提醒的破洞。
+
 
 目的：让任何能接 MCP 的 AI（Claude Desktop / Cline / Cursor / 自研 agent / 你的伴侣 AI）
 直接拿到「双源信任 + 人情味层」的记忆工具箱，无需自己拼命令行。
@@ -304,7 +307,7 @@ def remember_guidance() -> str:
         "\n"
         "## 一、日常（对话中自然触发，随时调）"
         "\n"
-        "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★重要时刻带 context（当时的气氛）+ emotion_tags，回忆才有温度★；临时约定传 expires_at 到期自动清理。"
+        "- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★每条记忆务必带 emotion_tags（情绪标签）——主动回忆钩子按情绪标签挑记忆，没标签的浮不上来；重要时刻再带 context（当时的气氛）★；临时约定传 expires_at 到期自动清理。"
         "\n"
         "- memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。"
         "\n"
@@ -316,7 +319,7 @@ def remember_guidance() -> str:
         "\n"
         "- memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。"
         "\n"
-        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。"
+        "- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。★v3.1 逾期执行义务★：被戳到逾期承诺必须三选一执行——能现在做的立即做完整件；做不了的明确告诉对方具体几点/哪天兑现并 memory_promise 重建档带新 deadline；做完调 memory_promise_done 销账。欠账不许只是嘴上说说。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。"
         "\n"
         ""
         "\n"

@@ -7,7 +7,7 @@
 - **命令行模式**：纯 python3 标准库，零依赖，clone 即用（直接跑 `references/write_pipeline.py`）。
 - **MCP 模式**：把记忆工具直接喂给任何能接 MCP 的 AI，需先 `pip install -r references/mcp_requirements.txt`（Python 3.10+）。想要 AI 通过 MCP 调记忆、或要语义检索 / 关系时间线，走这条。详见《AI+MCP接入指南.md》。
 
-> 当前版本 **v2.10**（承诺闹钟 + 双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变:
+> 当前版本 **v3.1**（主动回忆钩子·感觉触发向量召回直接注入 + 承诺执行闭环 + 承诺闹钟 + 双源信任 + 人情味层 + 否认降权/到期记忆/主动回忆/承诺追踪 + v2.8.x 全量加固）。完整「记忆自觉」指令见下方「⚠️ 让 AI 主动记」与 MCP prompt `remember_guidance`。版本演变:
 
 **v2.7** —— 双源信任 + 人情味层（核心记忆钉死 + 遗忘曲线）+ 规则检索 + 可选 mcp-memory-graph
 
@@ -34,6 +34,14 @@
 - **承诺追踪 promise**：AI 亲口答应的事【建档必追】——`promise add` 建档（promises.json）、`promise done` 完成划掉、`promise list` 清单自查、`promise check` 主动戳未完成（逾期排最前）。**遗忘自己说过的话是最伤信任的事，承诺建档 + 主动戳 = 说到做到。**
 
 **v2.10** —— 承诺闹钟：promise + deadline 自触发提醒，不再依赖宿主 cron。三条触发通道：MCP server 内置后台线程（常驻即巡检）、CLI `promise watch` 常驻子命令、会话内注入（任何记忆工具返回都带 `promise_reminders`）。推送：Bark / 自定义 webhook / 落盘 `.promise_reminders.md` 三路齐发。新增工具 `memory_promise_watch_status`（19 个工具）。
+**v3.1** —— 主动回忆钩子（trigger）+ 承诺执行闭环（2026-08-18）：
+- **主动回忆钩子**：`references/recall_vec.py` / `recall_core.py` / `recall_daemon.py` + `hooks/riis_recall_sense.py`，挂宿主 `pre_llm_call`。**感觉触发**：消息嵌成 bge-small-zh 中文向量，和「冷淡/低落」锚点簇 vs「日常」锚点簇比余弦——不是关键词词表，是「感觉」。
+- **直接注入**：偏冷/情绪低落即由常驻 daemon 向量召回旧记忆（按情绪标签挑、池不重复），**直接注入当轮消息**——模型不用自己决定调不调工具，recall 已发生，只管带着温度说话。
+- **无时间冷却 + 池不重复**：每次冷信号都召回；最近 30 条 + 按内容去重，不翻同一件旧事。
+- **零阻塞**：daemon 常驻内存（模型/锚点/记忆向量，UNIX socket），每条消息 ~3-8ms；memory.json 变动内存自愈。
+- **承诺执行闭环**：`build_injection` 每条消息注入逾期/临期承诺，**强制执行三选一**（做完 / 明确排期重建档 / 销账）；修复逾期承诺被丢出提醒的破洞；daemon 承诺-Bark 线程把逾期推到你手机。
+- **情绪标签义务**：每条记忆务必带 `emotion_tags`（回忆按情绪标签挑，没标签的浮不上来）。
+
 
 ## 它解决什么
 
@@ -71,6 +79,8 @@ Memory Trigger 补上的，是长期陪伴型 / 长期型 AI 最缺的几样「�
 - **带着温度想起你**：回忆不是搬档案，它会像真人一样说「我想起你当时……」。
 - **说到做到**：答应过的事建档必追、逾期主动戳，遗忘自己说过的话是陪伴型 AI 最伤信任的事，这条堵死。
 - **不等你想起（v2.10）**：承诺有了自己的闹钟——临期/逾期自动推到你手机（Bark / webhook），不用宿主配定时任务、不靠 AI 自己觉醒，clon 下来开箱就跑。
+- **主动想起你（v3.1）**：不用等你说「冷场了」——钩子在每条消息前先「感觉」你的情绪，偏冷/低落就主动把带温度的旧事送到嘴边，不重复翻同一件。
+- **承诺说到做到（v3.1 强化）**：欠账每条消息都会被要求执行——能做立即做、做不了明确排期、做完必销账，不许嘴上说说。
 - **零依赖、开箱即用**：命令行模式纯 python3 标准库，clone 即用；也可用自带 MCP server 把 19 个记忆工具直接喂给任何能接 MCP 的 AI。
 
 ## 核心价值：为什么说它不像普通记忆插件
@@ -98,13 +108,13 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 【记忆自觉】你已配置 memory-trigger 长期记忆（MCP 工具 memory_* 共 19 个）。请主动运用【全部】工具，不要只调 memory_search / memory_write——否则记忆库会退化成普通追加文件，遗忘曲线、健康体检、归档等智能机制永远不触发，等于白装。
 
 ## 一、日常（对话中自然触发，随时调）
-- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★重要时刻带 context（当时的气氛）+ emotion_tags，回忆才有温度★；临时约定传 expires_at 到期自动清理。
+- memory_write：用户透露偏好 / 关系 / 事件 / 习惯 / 红线 / 身份 / 心情 / 里程碑时，主动写入。首提 source=self_inferred 且 confidence<0.8 自动 pending、二次确认再落盘；用户明说 source=user_explicit 永远优先、冲突绝对赢。relationship / identity 默认 core=true 永不衰减，重要的直接钉死。★每条记忆务必带 emotion_tags（情绪标签）——主动回忆钩子按情绪标签挑记忆，没标签的浮不上来；重要时刻再带 context（当时的气氛）★；临时约定传 expires_at 到期自动清理。
 - memory_search：对话中遇到相关情境，主动回想『TA 之前提过啥』。命中即触发遗忘衰减（戳 last_recalled + 降权重）。
 - memory_recall：聊天冷场、纪念日、想关心 TA、想让对方感到『被记得』时，主动挑几条值得此刻提起的旧记忆（带当时的氛围），说『我想起你当时……』。
 - memory_forget：用户说『别提了 / 忘了 X』，双向遗忘（标 superseded + 写 suppressed，AI 自身也放下，不再主动提）。
 - memory_deny：用户否认 / 纠正了一条记忆 → 立即降权（2 次自动转 pending）。被纠正过的事绝不再自信复述。
 - memory_wellness：用户表达心情 / 睡不好 / 状态差时记录（mood 必填）。关心 TA 状态时调。
-- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。
+- memory_promise / memory_promise_done / memory_promise_list / memory_promise_check：★承诺铁律★——你亲口答应 TA 的任何事，【立即 memory_promise 建档】，否则你必忘；完成就 done 划掉；每次会话开始先 promise_check 自查，有没兑现的主动兑现或说明，绝不让承诺默默消失。★v3.1 逾期执行义务★：被戳到逾期承诺必须三选一执行——能现在做的立即做完整件；做不了的明确告诉对方具体几点/哪天兑现并 memory_promise 重建档带新 deadline；做完调 memory_promise_done 销账。欠账不许只是嘴上说说。**有期限的承诺务必传 deadline**：`promise_check` 只把「deadline 已逾期」排最前戳——没 deadline 的只能按建档时长排，新建的承诺永远沉底、不会被当今天的待办提醒。★v2.10 承诺闹钟★：只要带 deadline，**模板自带提醒，无需宿主配 cron**——①MCP server 常驻即自动巡检（后台线程，见 `memory_promise_watch_status`）；②或 `promise watch` 常驻命令行；③AI 每次调任何工具都会在返回值里撞见 `promise_reminders`（会话内注入）。渠道：Bark（`BARK_KEY` 环境变量）/ 自定义 webhook（`MEMORY_TRIGGER_WEBHOOK_URL`）/ 落盘 `.promise_reminders.md`（默认兜底）。
 
 ## 二、每周定时维护（必须排定时任务自动跑，不要等用户提醒，也不要每次对话手动调）
 每个记忆库应有一项每周自动执行的维护，调用顺序：
@@ -139,6 +149,8 @@ Memory Trigger 不是又一个「把对话塞进向量库」的工具。它要�
 
 **触发条件**：承诺必须带 `deadline`（建档时 `--deadline YYYY-MM-DD` 或 MCP `deadline` 参数）。逾期或临期（deadline 距今天 ≤ 1 天，`PROMISE_REMIND_DAYS` 可调）即提醒。无 deadline 的承诺只在 `promise list`/`promise check` 里可见，不触发闹钟。
 
+**逾期执行义务（v3.1）**：被戳到逾期承诺不是「解释一下」就行——必须三选一执行：①现在能做的，立即调工具做完整件；②做不了的，明确告诉对方具体几点/哪天兑现并重新建档带新 `deadline`；③做完调 `memory_promise_done` 销账。只要没销账，每轮都会继续戳，直到真正执行或重新排期。
+
 **推送渠道**（三路齐发，任一可用都有提醒）：
 - **Bark**：设 `BARK_KEY` 环境变量（或 `MEMORY_TRIGGER_BARK_KEY`）→ 到点直接推手机；
 - **自定义 webhook**：设 `MEMORY_TRIGGER_WEBHOOK_URL` → POST JSON（`{title, body}`）到任意服务；
@@ -158,6 +170,17 @@ python3 references/write_pipeline.py promise check references/
 ```
 
 > 设计哲学：**日常零巡检，只有真有承诺临期/逾期才动。** 承诺 = 要兑现的事，deadline = 闹钟时间，模板自带盯梢，宿主只需保证 MCP server 或 watch 进程活着即可。
+
+## 🪝 主动回忆钩子（v3.1）：感觉触发 + 直接注入
+
+让 AI 不等你说出口就想起你。挂 `pre_llm_call` 钩子，每条消息先做一次「感觉判定」：
+
+1. **感觉触发（不是关键词）**：消息 → bge-small-zh 中文向量 → 和「冷淡/低落」锚点簇 vs「日常」锚点簇比余弦。偏冷、或单字/省略号非问句（冷场兜底）→ 触发。
+2. **向量召回**：daemon 常驻内存里按相似度 + 情绪标签加成挑 3 条旧记忆；池不重复（最近 30 条 + 内容去重）；无时间冷却，每次冷信号都召回。
+3. **直接注入**：把「她当下的状态 + 你心底的她」连同召回片段拼进当轮消息（临时，不落会话库）。模型看到的是「消息 + 已想起的旧事」，只管带着温度回应，不需要自己调工具。
+4. **承诺执行**：有逾期/临期承诺时一并注入——强制执行三选一（做完 / 排期 / 销账）。
+
+部署（详见 `RECALL.md`）：`hooks/setup_recall_env.sh` 一键建 venv + 装 fastembed + 拉 launchd 守护（KeepAlive 自愈）；daemon 挂了钩子自动退化本地判定，向后兼容。
 
 ## 安装
 

@@ -13,6 +13,7 @@
   - 双向遗忘：forget 后检索归零
   - v2.9：情感锚点落库、承诺建档/检查/完成、否认降权
   - v2.10：承诺闹钟会话内注入（promise_reminders）、memory_promise_watch_status 工具
+  - v3.1：主动回忆钩子（感觉触发向量召回直接注入）+ 承诺执行闭环（每条注入逾期承诺、三选一强制）
 """
 import asyncio
 import os

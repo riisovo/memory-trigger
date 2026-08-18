@@ -2,6 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 write_pipeline.py —— 记忆写入管线（真实工程实现，非 LLM 散文）
+===== v3.1（2026-08-18）=====
+主动回忆钩子 + 承诺执行闭环：
+- references/recall_vec.py / recall_core.py / recall_daemon.py + hooks/riis_recall_sense.py：
+  pre_llm_call 钩子「感觉触发」（bge-small-zh 中文向量比冷/热锚点簇，非关键词）+ 向量召回按情绪标签
+  + 召回池不重复（recent_ids 窗口 + 按内容去重）+ 无时间冷却 + 旧事直接注入当轮消息（模型无需自调工具）。
+- recall_daemon 常驻内存（模型/锚点/记忆向量，UNIX socket），每条消息 ~3-8ms；memory.json 变动内存自愈。
+- 承诺执行闭环：build_injection 每条消息注入逾期/临期承诺，强制执行三选一（做完/明确排期重建档/销账）；
+  修复 _promise_due_items 破洞（逾期超 1 天曾被丢出提醒）；daemon 承诺-Bark 线程推手机。
+- emotion_tags 写入义务：每条记忆务必带情绪标签（回忆按情绪标签挑）。
+- 注入前清洗 value 的 graph-uuid/日期噪声。
+
 ===== PATCH v2.6 (by 伙伴) =====
 相对 v2.3/v2.5 的改动（均带 `PATCH v2.6` 注释定位）：
 
