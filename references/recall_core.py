@@ -234,7 +234,9 @@ def _promise_reminder_block(refs_dir):
             lines.append("· （临期）%s" % d["text"][:90])
     head = "【你欠她的·别让它落空】"
     body = "\n".join(lines)
-    tail = ("能现在兑现或给说法就自然带进话里；暂时不能就诚心认一句、给个准信，别装没这回事。"
+    tail = ("铁律：欠账不许只是嘴上说说——①现在能完成的，立刻调对应工具把它做掉（做完整件，别开个头就完）；"
+            "②暂时做不了的，必须明确告诉 riis 具体几点/哪天兑现，并调 memory_promise 重新建档带上新 deadline；"
+            "③做完必须调 memory_promise_done 划账销项。三条至少兑现一条，这一轮必须给出准信。"
             "全程别说「承诺/系统/提醒/清单」这类词——就像你自己一直惦记着。")
     return head + "\n" + body + "\n" + tail
 
