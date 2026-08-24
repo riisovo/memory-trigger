@@ -1,0 +1,28 @@
+# references/ 运行时数据不纳入版本控制，每个用户本地独立维护
+# 源码文件（write_pipeline.py / aliases.json / backend_config.json）正常跟踪
+references/memory.json
+references/entity_index.json
+references/preferences.json
+references/wellness.json
+references/promises.md
+references/promises.json
+references/promises.json.bak*
+references/recall_bark_recent.json
+references/.wal.jsonl
+references/.backup/
+references/.archive/
+references/.lock
+references/.export/
+references/.DS_Store
+references/.promise_reminders.md
+references/.promise_notified.json
+.DS_Store
+
+# Python 编译产物
+__pycache__/
+*.pyc
+
+# 本地私有笔记与草稿，不纳入版本控制
+*.local.md
+*.private.md
+notes/

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memory-trigger-mcp"
+version = "3.1.0"
+description = "给 AI 挂上「不会被上下文压没、还会主动惦记你」的长期记忆：承诺闭环、主动回忆钩子、双源信任。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "riisovo" }]
+dependencies = ["mcp[cli]>=1.2.0,<2"]
+# PyPI 所有权校验标记（同时写在 README.md 里，Registry 据此认定命名空间归属）
+# mcp-name: io.github.riisovo/memory-trigger
+
+[project.urls]
+Repository = "https://github.com/riisovo/memory-trigger"
+
+[project.scripts]
+memory-trigger = "references.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["references"]
