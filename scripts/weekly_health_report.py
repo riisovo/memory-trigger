@@ -23,6 +23,7 @@ import json
 import datetime
 import contextlib
 import subprocess
+import time
 import urllib.parse
 
 # 让脚本能 import 同仓库的 write_pipeline.py（本脚本在 <repo>/scripts/，逻辑库在 <repo>/references/）
@@ -144,10 +145,17 @@ def _push_bark(title, content):
         return "Bark 未配置(BARK_KEY / BARK_NOTIFY_SH 均未设)，跳过推送"
     title_e = urllib.parse.quote(title)
     content_e = urllib.parse.quote(content)
-    icon = ("&icon=%s" % urllib.parse.quote(BARK_ICON, safe="")) if BARK_ICON else ""
-    url = "https://api.day.app/%s/%s/%s?isArchive=1%s" % (BARK_KEY, title_e, content_e, icon)
+    icon = urllib.parse.quote(BARK_ICON, safe="") if BARK_ICON else ""
     try:
-        r = subprocess.run(["curl", "-s", "-m", "15", url], capture_output=True, text=True, timeout=20)
+        import json as _json
+        payload = {"body": content, "title": title, "device_key": BARK_KEY}
+        if icon:
+            payload["icon"] = icon
+        r = subprocess.run(
+            ["curl", "-s", "-m", "15", "-X", "POST", "https://api.day.app/push",
+             "-H", "Content-Type: application/json",
+             "-d", _json.dumps(payload, ensure_ascii=False)],
+            capture_output=True, text=True, timeout=20)
         return r.stdout.strip() or "(无返回)"
     except Exception as e:
         return "Bark 推送失败: %s" % e
@@ -169,6 +177,15 @@ def main():
 
     print("[每周维护] refs_dir=%s  dry_run=%s" % (refs_dir, args.dry_run))
     maint = _run_maintenance(refs_dir, args.dry_run)
+    # === PATCH v3.2 === 维护跑完登记时间——maintenance_due 会话内注入以
+    # .last_maintenance 的 mtime 为真相源，不登记则 AI 整周都被提示撞脸。
+    if not args.dry_run:
+        try:
+            marker = os.path.join(refs_dir, ".last_maintenance")
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(time.strftime("%Y-%m-%dT%H:%M:%S+08:00"))
+        except Exception as e:
+            print("[touch] 登记失败(不影响周报): %s" % e)
     report = _build_report(refs_dir, maint)
     print("=" * 40)
     print(report)

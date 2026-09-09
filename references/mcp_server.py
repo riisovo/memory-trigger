@@ -132,6 +132,9 @@ def _call(fn, *args, **kwargs) -> dict:
         try:
             refs = _resolve_refs("", skip_selfcheck=True)
             extra = wp._promise_reminders_field(refs)
+            # === PATCH v3.2 === 维护提示同款注入：距上次全套维护超 7 天，
+            # decay/vacuum 等 5 个工具在对话里没有天然触发点，靠这里撞见。
+            extra.update(wp._maintenance_due_field(refs))
             if extra and isinstance(result, dict):
                 result = {**result, **extra}
         except Exception:
@@ -162,7 +165,9 @@ def memory_write(
     value: 记忆内容。source=self_inferred 且 confidence<0.8 会自动挂 pending，不会污染权威源；
     用户明说用 source=user_explicit 直接落 active。core=true 可钉死核心记忆（relationship/identity 默认钉死，永不衰减）。
     ★v2.9 新增★ context: 当时的气氛（情感锚点，回忆时 AI 能带着温度提起，如『说这句话时语气很轻快』）；
-    expires_at: 到期时间（YYYY-MM-DD 或 ISO）。临时约定/承诺类记忆传它，到期自动移出检索不再召回、且到期前 3 天会被 expire 检查提醒。"""
+    expires_at: 到期时间（YYYY-MM-DD 或 ISO）。临时约定/承诺类记忆传它，到期自动移出检索不再召回、且到期前 3 天会被 expire 检查提醒。
+    ★v3.2 冲突扫描★ 写入时自动做全库相似度扫描（bigram≥0.30，跨 entity/kind），返回值带 conflict_scan 字段——
+    命中旧相似记忆时主动向用户展示并询问『这条旧记忆要不要一起作废？』，避免新旧规则并存。"""
     refs = _resolve_refs(refs_dir)
     # core 已由 FastMCP 类型校验保证为 bool 或 None；防御性兜底
     core_arg = bool(core) if core is not None else None
@@ -177,13 +182,16 @@ def memory_write(
 
 @mcp.tool()
 def memory_search(query: str, refs_dir: str = "") -> str:
-    """按关键词检索 active 记忆（文件权威优先 + 有效权重降序，core 记忆恒靠前）。命中即戳 last_recalled 并触发遗忘衰减。对话中想『这人之前提过啥』就调它。"""
+    """按关键词检索 active 记忆（文件权威优先 + 有效权重降序，core 记忆恒靠前）。命中即戳 last_recalled 并触发遗忘衰减。对话中想『TA 之前提过啥』就调它。
+    ★v3.2 模糊检索★ 支持多词查询：空格/逗号/顿号分隔的词项逐个匹配，按命中词数加权排序——搜「a b c」能召回分别含这些词的记忆，不再要求整串按顺序出现。
+    结果里 source=keyword_fuzzy 的是多词模糊命中，confidence 随命中比例浮动；找不到 id 要 forget 时，先用这里拿到 id。"""
     return json.dumps(_call(wp.cmd_search, query, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 @mcp.tool()
 def memory_forget(entity_or_id: str, refs_dir: str = "", reason: str = "", kind: str = "") -> str:
-    """双向遗忘：记忆标 superseded，并写入 .suppressed.json + 生成 suppressed_prompt.md（让 AI 自身也『放下』，不再主动提）。用户说『别提了』就调它。"""
+    """双向遗忘：记忆标 superseded，并写入 .suppressed.json + 生成 suppressed_prompt.md（让 AI 自身也『放下』，不再主动提）。用户说『别提了』就调它。
+    entity_or_id 支持传记忆 id（mem_开头）或实体名。★v3.2★ 不确定 id 时先 memory_search 多词模糊检索拿到 id 再 forget，不再需要翻文件。"""
     return json.dumps(
         _call(wp.cmd_forget, entity_or_id, _resolve_refs(refs_dir), reason or None, kind or None),
         ensure_ascii=False,
@@ -377,6 +385,14 @@ def memory_promise_watch_status(refs_dir: str = "") -> str:
         "refs_dir": refs,
         "last_log": _promise_watch_log[-5:],
     }, ensure_ascii=False)
+
+
+@mcp.tool()
+def memory_touch_maintenance(refs_dir: str = "") -> str:
+    """★v3.2 维护登记★ 跑完维护五件套（decay/vacuum/stats/selfcheck/expire_check）后调它登记时间。
+    maintenance_due 注入以 .last_maintenance 文件 mtime 为唯一真相源——不登记则每次工具返回都会
+    重复撞见「该维护了」提示。周报 cron 跑完也会自动登记。"""
+    return json.dumps(_call(wp.cmd_touch_maintenance, _resolve_refs(refs_dir)), ensure_ascii=False)
 
 
 _promise_watch_th = None

@@ -529,6 +529,35 @@ def _prune_backups(bkp_dir, keep_groups=10):
                 pass
 
 # === PATCH v2.3 === 实体归一化
+# === PATCH v3.2 (模糊检索) === 查询词拆分：空格/逗号/顿号/分号分隔成词项。
+# 中文没有空格分词，多个概念用这些符号连接是常态；单字词保留（「桥」本身有信息量）。
+def _split_terms(query: str):
+    if not isinstance(query, str):
+        return []
+    import re as _re
+    parts = _re.split(r"[\s,，、;；/]+", query.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+# === PATCH v3.2 (冲突扫描·关键词通道) === 抽取两段文本共有的主题词（2+ 字连续片段）。
+# 思路：把两边文本都切成 2-4 字滑窗片段，统计片段级交集。bigram 集合级相似度
+# 对「同一主题、措辞完全不同」的场景（0.04）不敏感，片段交集能抓住「电话/打电话」
+# 这种主题重合。只做冲突报告的辅助通道，不影响写入主路径。
+def _shared_topic_words(a: str, b: str):
+    if not isinstance(a, str) or not isinstance(b, str):
+        return []
+    a_l, b_l = a.lower(), b.lower()
+    shared = set()
+    for n in (2, 3, 4):
+        for j in range(len(a_l) - n + 1):
+            frag = a_l[j:j+n]
+            if frag in b_l:
+                shared.add(frag)
+    # 长词吸收短词：「打电话」出现时「电话」不重复计
+    deduped = {w for w in shared if not any(w != o and w in o for o in shared)}
+    return sorted(deduped)
+
+
 def normalize_entity(entity, refs_dir, substring_match=False):
     """把实体名映射到标准名。
 
@@ -654,10 +683,34 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
         existing_idx = None
         similar_idx = None
+        # === PATCH v3.2 (冲突扫描) === 不只查同 entity+kind——把扫描面扩大到
+        # 内容 bigram 相似的任何 active 记忆（跨 kind、跨 entity），供冲突报告用。
+        # 旧逻辑只查同 entity+kind，写到「电话链路」时完全看不见库里还有两条
+        # 同主题旧记忆（跨 entity/kind）——新旧规则并存，
+        # AI 一边记新规则一边残留旧规则（实测：新旧两套规则共存）。
+        _conflict_cands = []  # [(idx, bigram_sim, entry)] 跨 entity/kind 的相似 active 记忆
 
         for i, entry in enumerate(memory):
             if not isinstance(entry, dict):
                 continue  # 脏数据（字符串/数字混入）跳过，不让它毒死整条写入链
+            # === PATCH v3.2 === 跨 entity/kind 相似扫描（只做报告，不动写入路径）。
+            # 注意必须放在同 entity+kind 判断【之前】——那条路径命中后会 break 整个循环，
+            # 放后面就永远轮不到它跑（实测首条即同 entity 时扫描 0 次直接跳出）。
+            # 双通道：bigram 全局形状相似（≥0.30）或核心词重叠（≥2 个 2+ 字共有词）。
+            if _norm_status(entry) == "active":
+                old_val = _safe_str(entry.get("value", ""))
+                if len(old_val) >= 4 and len(value) >= 4:
+                    old_bg = {old_val[j:j+2] for j in range(len(old_val)-1)}
+                    new_bg = {value[j:j+2] for j in range(len(value)-1)}
+                    inter = old_bg & new_bg
+                    uni = old_bg | new_bg
+                    sim = (len(inter) / len(uni)) if uni else 0.0
+                    # 核心词通道：bigram 对短语义重叠不敏感（实测 0.04 抓不住电话场景），
+                    # 用两边共有的 2+ 字片段做代理——「电话/打电话」这类主题词撞上即算。
+                    shared_kw = [w for w in _shared_topic_words(old_val, value) if len(w) >= 2]
+                    if sim >= 0.30 or len(shared_kw) >= 2:
+                        # 关键词通道命中时给个最低 sim 分，保证排序可见
+                        _conflict_cands.append((i, max(sim, 0.32), entry))
             e_kind = entry.get("kind") or entry.get("type")
             if entry.get("entity") == entity and e_kind == kind:
                 if _norm_status(entry) == "active":
@@ -831,6 +884,23 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
         # search 能召回这条记忆，suppressed_prompt.md 却仍在命令 AI「不要主动提及」。
         _unsuppress_entity(refs_dir, entity)
 
+        # === PATCH v3.2 (冲突报告) === 落盘后把跨库相似记忆随返回值一起报出去，
+        # 让 AI 写新规则时立刻看见「库里还有旧规则」，主动问用户要不要一起作废。
+        # 只报不删——决定权在人和 AI 的对话里，不做静默代删。
+        conflict_report = []
+        try:
+            for _i, _sim, _e in sorted(_conflict_cands, key=lambda x: -x[1])[:5]:
+                conflict_report.append({
+                    "id": _e.get("id"),
+                    "entity": _e.get("entity"),
+                    "kind": _e.get("kind") or _e.get("type"),
+                    "similarity": round(_sim, 3),
+                    "value_preview": _safe_str(_e.get("value", ""))[:120],
+                    "hint": "疑似新旧规则并存——考虑 memory_forget 这条或确认共存",
+                })
+        except Exception:
+            conflict_report = []
+
         print(json.dumps({
             "status": "committed",
             "memory_id": new_id,
@@ -844,7 +914,13 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "context": _safe_str(context) or None,     # === PATCH v2.9 ===
             "expires_at": _parse_expiry(expires_at),   # === PATCH v2.9 ===
             "mode": mode,
-            "targets": targets
+            "targets": targets,
+            # === PATCH v3.2 ===
+            "conflict_scan": {
+                "similar_count": len(_conflict_cands),
+                "conflicts": conflict_report,
+                "note": "相似度≥0.30 的跨库旧记忆，命中即问：『这条旧记忆要不要一起作废？』",
+            },
         }, ensure_ascii=False))
 
     finally:
@@ -922,6 +998,15 @@ def cmd_search(query, refs_dir):
 
     q = query.lower()
 
+    # === PATCH v3.2 (模糊检索) === 多词查询按词命中数排序，不再要求整串子串全命中。
+    # 旧逻辑 `q in val`：搜「a b c」必须三个词按顺序连着出现才能命中——
+    # 中文复合查询召回率≈0（实测：库里明明有电话桥记忆，三词连搜返回 0 条）。
+    # 新逻辑：拆词后逐词匹配 value/entity，按命中词数加权排序，多词查询也能召回。
+    # 词间用空格/顿号分隔；单字词也参与匹配（中文没有天然空格分词）。
+    _q_terms = [t for t in _split_terms(query) if t]
+    if not _q_terms:
+        _q_terms = [q]  # 空拆分兜底：按整串处理
+
     if query in ei.get("entities", {}):
         ent = ei["entities"].get(query) or {}
         mid = ent.get("last_memory_id") if isinstance(ent, dict) else None
@@ -948,7 +1033,9 @@ def cmd_search(query, refs_dir):
             continue
         val = _safe_str(entry.get("value", "")).lower()
         ent_name = _safe_str(entry.get("entity", "")).lower()
-        if q in val or q in ent_name:
+        # === PATCH v3.2 (模糊检索) === 单词直命中（保留旧精确路径）；
+        # 多词：逐词找，命中数>0 即入池，按命中比例打分。
+        if len(_q_terms) == 1 and q in val or q in ent_name:
             eid = entry.get("id")
             if eid is None or not any(r["entry"].get("id") == eid for r in results):
                 results.append({
@@ -956,6 +1043,18 @@ def cmd_search(query, refs_dir):
                     "confidence": 0.75,
                     "entry": entry
                 })
+        elif len(_q_terms) > 1:
+            hits = sum(1 for t in _q_terms if t in val or t in ent_name)
+            if hits > 0:
+                eid = entry.get("id")
+                if eid is None or not any(r["entry"].get("id") == eid for r in results):
+                    results.append({
+                        "source": "keyword_fuzzy",
+                        "confidence": 0.4 + 0.5 * (hits / len(_q_terms)),
+                        "entry": entry,
+                        "_fuzzy_hits": hits,
+                        "_fuzzy_total": len(_q_terms),
+                    })
 
     # === PATCH v2.6 B3 === 源排序 + 冲突 supplement 标记
     for r in results:
@@ -1856,6 +1955,54 @@ def _promise_reminders_field(refs_dir):
     if not items:
         return {}
     return {"promise_reminders": items}
+
+
+# === PATCH v3.2 (维护提示注入) === 痛点：decay/vacuum/backup/selfcheck/expire_check/stats
+# 在对话流里没有天然触发点——AI 永远「想不起来」调它们（90 天实测全 0 次，唯一一次
+# 是用户戳了才跑）。promise_reminders 证明了「会话内注入」是对这个脑子的物理约束：
+# 提示词是愿望，注入才是机制。这里给维护工具接同款：距上次维护超 7 天，
+# 每次 memory_write / memory_search 的返回值都带 maintenance_due 字段，
+# AI 撞见就主动跑一遍维护五件套，不靠自觉、不靠周日 cron 兜底。
+_MAINT_DUE_FILE = ".last_maintenance"
+_MAINT_INTERVAL_DAYS = 7
+
+
+def _maintenance_due_field(refs_dir):
+    """会话内注入用：距上次全套维护超过 7 天时返回 {maintenance_due: {...}}。
+    写入/检索命中即撞见——AI 看见该字段应立即调 decay→vacuum→stats→selfcheck→expire_check。"""
+    try:
+        marker = os.path.join(refs_dir, _MAINT_DUE_FILE)
+        if os.path.exists(marker):
+            age_days = (time.time() - os.path.getmtime(marker)) / 86400.0
+        else:
+            age_days = float("inf")  # 从未维护过——立即提示
+        if age_days < _MAINT_INTERVAL_DAYS:
+            return {}
+        return {
+            "maintenance_due": {
+                "days_since_last": None if age_days == float("inf") else round(age_days, 1),
+                "steps": [
+                    "memory_decay", "memory_vacuum", "memory_stats",
+                    "memory_selfcheck", "memory_expire_check",
+                ],
+                "note": "距上次记忆维护已超 7 天——撞见此字段立即依次调用上面 5 个工具，"
+                        "跑完调 memory_touch_maintenance 登记时间，不要等用户提醒。",
+            }
+        }
+    except Exception:
+        return {}
+
+
+def cmd_touch_maintenance(refs_dir):
+    """登记「刚刚跑完全套维护」——maintenance_due 注入以文件 mtime 为唯一真相源，
+    调本工具即刷新。维护五件套跑完必须调它，否则每次工具返回都会重复撞见提示。"""
+    marker = os.path.join(refs_dir, _MAINT_DUE_FILE)
+    try:
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(ts_now())
+        print(json.dumps({"status": "touched", "at": ts_now()}, ensure_ascii=False))
+    except Exception as e:
+        print(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
 
 
 def _unsuppress_entity(refs_dir, entity):
