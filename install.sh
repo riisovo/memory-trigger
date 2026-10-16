@@ -2,7 +2,7 @@
 # install.sh —— memory-trigger 记忆技能「一键加载即用」安装器
 # 别人从 GitHub clone 后只需: bash install.sh
 # 会自动: 跑引擎冒烟 + 双源自检（纯标准库，零额外依赖）。
-# 本模板默认本地文件模式，零依赖；想要语义检索/关系时间线见 SKILL.md §9 接 mcp-memory-graph。
+# 本模板默认本地文件模式，零依赖。
 # 路径全部基于仓库位置动态计算，绝不写死任何机器路径。
 set -euo pipefail
 
@@ -25,4 +25,3 @@ echo "-- 双源自检: test_dual_source.py"
 echo
 echo "== 安装完成 =="
 echo "默认本地文件模式，零依赖，clone 即用。"
-echo "想要语义检索 / 关系时间线 / 自动梦境修剪，见 SKILL.md §9 接 mcp-memory-graph（可选，不在此脚本内自动注入）。"

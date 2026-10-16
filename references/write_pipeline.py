@@ -1,53 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-write_pipeline.py —— 记忆写入管线（真实工程实现，非 LLM 散文）
-===== v3.1（2026-08-18）=====
-主动回忆钩子 + 承诺执行闭环：
-- references/recall_vec.py / recall_core.py / recall_daemon.py + hooks/recall_sense.py：
-  pre_llm_call 钩子「感觉触发」（bge-small-zh 中文向量比冷/热锚点簇，非关键词）+ 向量召回按情绪标签
-  + 召回池不重复（recent_ids 窗口 + 按内容去重）+ 无时间冷却 + 旧事直接注入当轮消息（模型无需自调工具）。
-- recall_daemon 常驻内存（模型/锚点/记忆向量，UNIX socket），每条消息 ~3-8ms；memory.json 变动内存自愈。
-- 承诺执行闭环：build_injection 每条消息注入逾期/临期承诺，强制执行三选一（做完/明确排期重建档/销账）；
-  修复 _promise_due_items 破洞（逾期超 1 天曾被丢出提醒）；daemon 承诺-Bark 线程推手机。
-- emotion_tags 写入义务：每条记忆务必带情绪标签（回忆按情绪标签挑）。
-- 注入前清洗 value 的 graph-uuid/日期噪声。
-
-===== PATCH v2.6 (by 伙伴) =====
-相对 v2.3/v2.5 的改动（均带 `PATCH v2.6` 注释定位）：
-
-  【A 组：时间戳 / 召回追踪增强】
-  A1) 每条记忆新增 `last_recalled` 字段（初始 null）。cmd_search 命中即戳时间，
-      解决"只知写入时间、不知何时被用过"——支撑冷记忆衰减 / 热度加权。
-  A2) wellness 的 recorded_at 改用 ts_now()（与全库统一 UTC+8），去掉 astimezone() 双套机制。
-  A3) cmd_stats 新增"最久未召回"排行（last_recalled 为空则退回 created 计算）。
-
-  【B 组：信任优先级 / 源 / 情感 / 双向遗忘】
-  B1) source 标签：write 支持 --source {file_import|self_inferred|user_explicit}，
-      默认 auto_detect。self_inferred 且 confidence<阈值 → status=pending 不进 active，
-      防"幻觉固化"污染权威源。
-  B2) 情感 schema 扩展：kind 新增 relationship / emotion；新增可选 emotion_tags
-      列表（如 ["possessive","jealous","caring"]），让有感情基础的记忆不被压扁成 pos/neg。
-  B3) 检索源排序：结果标注 authority(file=file_import/user_explicit/auto_detect；
-      self=self_inferred)，file 优先；同实体多源冲突时，self 侧标 supplement=true 仅作补充。
-  B4) 双向遗忘 forget 命令：把记忆标 superseded，并写入 .suppressed.json + 生成
-      suppressed_prompt.md（"别再主动提 X"），让 agent 自身也"放下"，不只清文件。
-
-  【核心规则（信任优先级，固化进代码与 SKILL）】
-  文件记忆 > 自身印象。检索先查文件；文件空才用自身。自身印象定期单向沉淀进文件
-  （self_inferred 经用户确认后升级 active）。写内存的是缓存，文件是唯一权威源。
-
-  ★ 配套：merge_migrate.py 做"接入时双源合并迁移"，把本地文件 + agent 自述记忆
-    安全并成一套干净初始库（冲突以文件为准）。
-
-  【PATCH v2.7 (by 伙伴) —— 人情味层】
-  C1) 核心记忆钉死 core：kind ∈ {relationship, identity} 默认 core=True（"我们是谁"
-      的基石，永不衰减）；也可用 --core true|false 显式覆盖。
-  C2) 遗忘曲线 importance：每条记忆带 importance（初始 1.0），search 命中即按
-      importance *= 0.995 ** days_since_last_recalled 衰减（半衰期≈138天，慢忘）；
-      core 记忆不参与衰减。新增 decay 命令可周期性统一衰减全库。
-  C3) search 结果按"权威优先 + effective_importance 降序"排序，core 记忆恒靠前；
-      stats 新增核心记忆数 / 平均权重 / 最弱记忆排行。
+write_pipeline.py —— 长期记忆核心引擎与 CLI 入口
+============================================
+核心机制：
+  1) 双源信任（Dual-Source Trust）：
+     · 区分文件权威源（user_explicit / file_import）与自身推断源（self_inferred）。
+     · 写入必填 confidence（0..1）；self_inferred 且 confidence ≤ 0.85 自动挂起为 pending（不进检索），
+       待同一事实被高置信或用户明说再次确认时自动转正为 active。
+     · 跨实体/跨类型全库相似度扫描（bigram + 文档频率过滤主题词），返回疑似冲突与用户确认问句（ask_user_this），
+       不静默作废已有记忆。
+  2) 人情味层与遗忘曲线：
+     · 核心记忆钉死（core）：relationship / identity 默认 core=True，永不衰减；支持 --core 显式指定。
+     · 艾宾浩斯衰减（importance）：非核心记忆按距上次提及（last_mentioned）天数指数衰减（半衰期≈138 天）。
+     · 情感锚点（context）、情绪标签（emotion_tags）、到期时间（expires_at）、否认降权（deny，2 次转 pending）、
+       双向遗忘（forget，标记 superseded 并生成 suppressed_prompt.md）。
+  3) 检索与主动回忆（想起 ≠ 提及）：
+     · search（提及）：支持多词模糊检索，按权威层、匹配度、有效权重排序，结合 72h 展示冷却；
+       命中即重置衰减并刷新 last_mentioned 与 last_recalled。
+     · recall（想起）：温热通道 + 旧事重提通道（入库 >30 天且距上次想起 >7 天，按沉默天数排序），
+       仅刷新 last_recalled（供 24h 去重），不续命、不加分；支持按 tags 定向召回。
+  4) 承诺闭环与自我进化：
+     · promise（add / done / list / check / watch）：承诺建档、逾期追踪与三路提醒推送（Bark / webhook / 落盘）。
+     · evolve / evolve-check / retraction-scan：全谱记忆四档配额轮批复盘、六道判据举证闸门、宿主记忆文件悬空引用扫描。
+  5) 并发与数据安全：
+     · flock 文件锁互斥、写前 WAL（.wal.jsonl）与恢复后截断、微秒级成对快照备份（.backup）与损坏自动隔离恢复。
 ==============================
 命令：
   write <entity> <kind> <value> [refs_dir] [--mode local]
@@ -79,6 +56,7 @@ except ImportError:
 import json
 import math
 import os
+import re
 import sys
 import time
 import shutil
@@ -87,14 +65,14 @@ from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=8))  # UTC+8
 
-# === PATCH v2.8.3 (加固) === 数值合法区间
+# 数值合法区间
 CONFIDENCE_MIN, CONFIDENCE_MAX = 0.0, 1.0
 SLEEP_HOURS_MIN, SLEEP_HOURS_MAX = 0.0, 24.0
 
-# === v2.8.4 === wellness 心情记录条数上限（截断保留最近 N 条，防无界增长）
+# wellness 心情记录条数上限（保留最近 N 条，防止文件无界增长）
 WELLNESS_MAX_RECORDS = 365
 
-# === v2.9 人情味增强 === 到期记忆 / 否认降权 / 主动回忆 / 承诺追踪
+# 到期记忆 / 否认降权 / 主动回忆 / 承诺追踪参数
 # 到期记忆：expires_at 到期后自动移出 active（不再被检索召回），数据保留可查
 EXPIRY_REMIND_DAYS = 3            # 到期前多少天列为"即将到期"提醒
 # 否认降权：用户否认一条记忆 → importance ×DENY_FACTOR 且记录 deny_count；
@@ -104,12 +82,15 @@ DENY_TO_PENDING_AFTER = 2
 # 主动回忆：recall 建议的评分加分（让"从未被提起 / 带情感 / 快到期"的记忆更容易被想起）
 RECALL_BONUS_NEVER = 0.15
 RECALL_BONUS_EXPIRING = 0.20
-# === 情绪偏好（recall 排序）=== 甜弹药标签排前，关心类次之，平淡/严肃不加分
+# 情绪偏好（recall 排序）：正向温暖标签优先，关心类次之，平淡/严肃不加分
 SWEET_TAGS = {"甜蜜", "温暖", "想念", "", "撒娇", "激动", "关心", "害羞"}
 CARE_TAGS = {"委屈", "担心", "生气", "疲惫"}
 RECALL_BONUS_SWEET = 0.5
 RECALL_BONUS_CARE = 0.25
-RECALL_RECENCY_HOURS = 24  # 非核心记忆被 recall 后，多久内不再进池（防同一条一天说 50 次）
+RECALL_RECENCY_HOURS = 24  # 非定向 recall 后 24h 内不再进入常规召回池
+# 旧事重提通道双阈值（同时满足才进入冷通道）：
+RECALL_COLD_AGE_DAYS = 30   # 阈值一：入库满 30 天
+RECALL_GAP_DAYS = 7         # 阈值二：距上次被 recall 满 7 天
 
 def recall_emotion_boost(tags):
     """按情绪标签给 recall 排序加分：甜弹药优先，关心类次之，平淡/严肃不加分。"""
@@ -120,31 +101,28 @@ def recall_emotion_boost(tags):
         return RECALL_BONUS_CARE
     return 0.0
 
-# === PATCH v2.6 B2 === 允许 kind 取值（含情感维度扩展 + 与 SKILL.md §3.1/§3.3 对齐）
+# 允许的记忆类型枚举（与 SKILL.md §3.1 对齐）
 ALLOWED_KINDS = {
     "preference", "event", "habit", "rule", "scene",
     "relationship", "emotion",
-    "identity", "milestone", "general",  # 与 SKILL.md §3.1 / §3.3 状态机对齐
+    "identity", "milestone", "general",
 }
-# self_inferred 低于此置信度 → 落 pending（不进 active，防幻觉固化）
-SELF_INFERRED_PENDING_THRESHOLD = 0.8
+# self_inferred 置信度小于等于此阈值时落 pending（不进 active 检索，防低置信推断固化）
+SELF_INFERRED_PENDING_THRESHOLD = 0.85
 
-# === PATCH v2.7 (人情味层) === 遗忘曲线 + 核心记忆钉死
-# Ebbinghaus 式衰减：importance *= DECAY_FACTOR ** days_since_last_recalled
-# 半衰期 ≈ ln(2)/-ln(0.995) ≈ 138 天（慢忘，符合长久伴侣记忆）
+# 遗忘曲线与核心记忆钉死
+# Ebbinghaus 式衰减：importance *= DECAY_FACTOR ** days_since_last_mentioned（半衰期 ≈ 138 天）
 DECAY_FACTOR = 0.995
-# 这些类型默认钉死为核心记忆（永不衰减）：关系 / 身份是"我们是谁"的基石
+# 默认钉死为核心记忆（永不衰减）的类别
 CORE_KINDS = {"relationship", "identity"}
 
-# === PATCH v2.3 === 默认别名归一化表
+# 默认实体别名归一化表
 DEFAULT_ALIASES = {
-    "旧书店": "读书",
     "旧书店": "读书",
     "科幻小说": "读书",
     "杂志": "读书",
     "图书馆": "读书",
     "报刊亭": "读书",
-    "书店": "读书",
     "书店": "读书",
     "篮球": "运动",
     "跑步": "运动",
@@ -182,7 +160,7 @@ def safe_read_json(path):
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
-# === PATCH v2.8.3 (加固) === 类型兜底：脏数据（None / 字符串 / 缺字段）不得让运算崩溃
+# 类型安全转换：对 None / 异常类型提供默认值兜底
 def _safe_str(v, default=""):
     """任何值安全转字符串：None / 数字 / dict 都不炸。"""
     if v is None:
@@ -224,12 +202,7 @@ def _require_finite(name, v, lo, hi):
     return f
 
 def _quarantine(path, why):
-    """把损坏文件另存为 .corrupt.<ts>，绝不原地丢弃——数据可人工找回。
-
-    === PATCH v2.8.3 === 时间戳精确到微秒 + 同名兜底加序号。
-    原来用秒级 ts，同一秒内连续损坏会 copy2 同名覆盖，只剩最后一份证据；
-    而"反复损坏"恰恰是坏客户端/坏磁盘的典型症状，前几份才是诊断关键。
-    """
+    """将损坏文件隔离另存为 .corrupt.<微秒时间戳>（同名递增序号），保留现场供排查恢复。"""
     if not os.path.exists(path):
         return None
     stamp = datetime.now(TZ).strftime("%Y-%m-%dT%H-%M-%S-%f")
@@ -260,14 +233,12 @@ def _restore_from_backup(refs_dir, stem):
     return None
 
 def read_json_typed(path, expect, refs_dir=None, stem=None):
-    """读 JSON 并保证类型正确（expect=list|dict）。
+    """读取 JSON 并校验顶层类型（expect=list|dict）。
 
-    这是 v2.8.3 的核心加固点：此前 `safe_read_json(...) or []` 会把
-    「文件损坏」和「文件不存在」混为一谈，导致损坏后写入直接用空列表覆盖，
-    **静默清空全部历史记忆**。现在的策略：
+    读取策略：
       1. 文件不存在        → 返回空容器（正常冷启动）
-      2. 文件损坏/类型不符 → 先隔离 .corrupt 副本，再尝试从 .backup 恢复；
-                            恢复不到才以空容器继续（此时原始数据仍在 .corrupt 里）
+      2. 文件损坏/类型不符 → 先隔离 .corrupt 副本，再尝试从 .backup 恢复最近可用快照；
+                            无可用快照时返回空容器（原始损坏文件已保存在 .corrupt）
     """
     empty = [] if expect is list else {}
     if not os.path.exists(path):
@@ -292,18 +263,16 @@ def safe_write_json(path, data):
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            # allow_nan=False：最后一道防线，宁可写失败也不产出非法 JSON（裸 NaN/Infinity）
+            # allow_nan=False：禁止写出裸 NaN/Infinity，确保跨语言标准 JSON 兼容性
             json.dump(data, f, ensure_ascii=False, indent=2, allow_nan=False)
-        # os.replace 跨平台原子替换：Windows 上目标已存在时 os.rename 会抛
-        # FileExistsError，导致每次改写已有文件都失败；os.replace 在 POSIX/Windows
-        # 均覆盖式替换（见 #11）。
+        # 使用 os.replace 执行跨平台原子覆盖替换
         os.replace(tmp_path, path)
     except PermissionError as e:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise PermissionError(
             f"无写权限：无法写入 {path}。常见于记忆库目录由 root/其他用户创建、"
-            f"当前 MCP 进程无写权限，或 backend_config 开启 mirror_mode=graph 但其 sqlite 库不可写。"
+            f"当前 MCP 进程无写权限。"
             f"原错误：{e}"
         )
     except Exception:
@@ -330,9 +299,6 @@ def file_lock(refs_dir):
             if time.time() > deadline:
                 os.lseek(fd, 0, 0)
                 raw = os.read(fd, 256).rstrip(b'\x00').rstrip(b' ')
-                # === PATCH v2.8.3 === locker_pid 先给默认值：此前 .lock 内容损坏时
-                # json.loads 抛错走 except pass，下面却仍引用 locker_data →
-                # UnboundLocalError 掩盖了真正的 TimeoutError，调用方无从判断是超时。
                 locker_pid = "unknown"
                 try:
                     locker_data = json.loads(raw)
@@ -375,17 +341,8 @@ def wal_append(refs_dir, entry):
         )
 
 def _wal_prune(refs_dir, keep):
-    """=== 修复 (finding #3) === WAL 重放后就地截断，只保留 keep（重放失败）的条目，
-    其余清空，彻底阻断 WAL 的无限增长。
-
-    此前 cmd_recover 只重放未提交行、从不截断 .wal.jsonl：每跑一次磁盘里就多攒一批
-    upsert+commit 行（实测 1→3→5→7… 只增不减）。虽然已落盘的 memory_id 会被跳过不
-    重放，但 WAL 文件本身永不缩小，长期运行等同于缓慢泄漏磁盘。
-
-    注意：重放时 cmd_write 会向 WAL 追加它自己的新 upsert+commit，这些代表**已成功
-    落盘**的记录，不需要再被恢复——截断时一并清除是正确行为。整个重写在文件锁内完成，
-    避免与并发写入竞争。
-    """
+    """WAL 重放完成后截断 .wal.jsonl，仅保留重放失败的条目（keep），防止 WAL 文件无限增长。
+    整个重写过程在文件锁内原子执行。"""
     path = os.path.join(refs_dir, ".wal.jsonl")
     fd = file_lock(refs_dir)
     try:
@@ -408,13 +365,7 @@ def _wal_prune(refs_dir, keep):
 
 
 def _backup_candidates(bkp_dir, stem):
-    """该 stem 的备份快照路径列表，从新到旧。
-
-    === PATCH v2.8.3 === 按文件 mtime 排序而不是文件名：v2.8.3 起备份时间戳
-    改为微秒格式（旧格式带 '+08-00' 时区后缀），两种格式混在一起做字符串
-    排序会错判新旧（'+' < '-'），导致恢复时取到更旧的快照。mtime 不受
-    命名格式影响，且升级前后都成立。
-    """
+    """返回指定 stem 的备份快照路径列表，按文件 mtime 从新到旧排序。"""
     try:
         names = [f for f in os.listdir(bkp_dir)
                  if f.startswith(stem + "_") and f.endswith(".json")]
@@ -436,19 +387,13 @@ def _latest_backup_path(bkp_dir, stem):
 _BACKUP_EXPECT = {"entity_index": dict, "memory": list}
 
 def backup_files(refs_dir):
-    """快照 entity_index.json + memory.json 到 .backup。
+    """为 entity_index.json 与 memory.json 创建一致性快照到 .backup。
 
-    === PATCH v2.8.3 (3.3a) === 四处改动，缺一不可：
-      1. **拒绝备份损坏文件**（最关键）：备份前先校验 JSON 可解析且类型正确。
-         此前会把已损坏的 memory.json 原样拍进 .backup，等于亲手毁掉最后的
-         救命快照——恢复时读到的全是坏数据，历史记忆真正永久丢失。
-      2. **时间戳带微秒**：原来是秒级，同一秒内的两次备份会 copy2 同名覆盖。
-         实测「写入→损坏→再写入」全发生在 1 秒内时，好快照被坏快照顶掉。
-      3. **内容去重**：与最新快照逐字节相同则整体跳过，避免 write-through 后
-         下一次写入前又拍一张一模一样的快照，把保留窗口（20 份）迅速冲掉。
-      4. **配对写入**：只要任一文件有变化，两个文件就用同一个 ts 一起备份。
-         回滚逻辑靠文件名里的 ts 配对取回两个文件，若只备份其中一个，会导致
-         回滚后 entity_index 与 memory 版本错位（索引指向不存在的记忆）。
+    备份策略：
+      1. 校验通过才备份：备份前校验 JSON 可解析且顶层类型正确，避免将损坏文件写入备份。
+      2. 微秒级时间戳命名：防止同一秒内多次写入产生同名覆盖。
+      3. 内容去重：与最新快照逐字节相同时跳过写入，避免无变化快照冲刷保留窗口。
+      4. 成对写入：任一文件发生变化时使用同一时间戳成对备份，确保回滚时索引与数据版本一致。
     """
     bkp_dir = os.path.join(refs_dir, ".backup")
     os.makedirs(bkp_dir, exist_ok=True)
@@ -487,15 +432,7 @@ def backup_files(refs_dir):
     _prune_backups(bkp_dir, keep_groups=10)
 
 def _prune_backups(bkp_dir, keep_groups=10):
-    """按「快照组」淘汰旧备份，保留最近 keep_groups 组。
-
-    === PATCH v2.8.3 (4.5) === 原实现是 `sorted(os.listdir())` 后从头删到
-    只剩 20 个文件。文件名字母序里 `entity_index_*` 恒排在 `memory_*` 之前，
-    于是清理总是优先删光 entity_index 快照——实测跑成 memory 16 份、
-    entity_index 仅 4 份，能配对的只有 4 组。一旦触发回滚，找不到同 ts 的
-    entity_index，就只回滚了 memory，索引与记忆版本错位。
-    现在改为按同一 ts 归组、整组淘汰，保证任何时刻两类快照都成对存在。
-    """
+    """按同一时间戳的快照组为单位淘汰旧备份，保留最近 keep_groups 组，确保 memory 与 entity_index 成对留存。"""
     groups = {}
     try:
         names = os.listdir(bkp_dir)
@@ -528,9 +465,7 @@ def _prune_backups(bkp_dir, keep_groups=10):
             except OSError:
                 pass
 
-# === PATCH v2.3 === 实体归一化
-# === PATCH v3.2 (模糊检索) === 查询词拆分：空格/逗号/顿号/分号分隔成词项。
-# 中文没有空格分词，多个概念用这些符号连接是常态；单字词保留（「桥」本身有信息量）。
+# 查询词拆分：按空格/逗号/顿号/分号/斜杠拆分为词项（保留单字词）
 def _split_terms(query: str):
     if not isinstance(query, str):
         return []
@@ -539,35 +474,88 @@ def _split_terms(query: str):
     return [p.strip() for p in parts if p.strip()]
 
 
-# === PATCH v3.2 (冲突扫描·关键词通道) === 抽取两段文本共有的主题词（2+ 字连续片段）。
-# 思路：把两边文本都切成 2-4 字滑窗片段，统计片段级交集。bigram 集合级相似度
-# 对「同一主题、措辞完全不同」的场景（0.04）不敏感，片段交集能抓住「电话/打电话」
-# 这种主题重合。只做冲突报告的辅助通道，不影响写入主路径。
-def _shared_topic_words(a: str, b: str):
+# 冲突扫描关键词通道：抽取两段文本共有的 2~6 字语义片段（按标点切段，过滤停用词与全库高频词），
+# 作为 bigram 相似度的补充通道，捕捉「措辞不同但核心主题词重合」的同主题记忆。
+
+# 停用数字与符号残片
+_STOP_FRAGS = {
+    "20", "26", "10", "19", " c", " m", " s", " t", " a", " b", " o", " p", " d",
+    "6-", "-0", "-1", "-2", "02", "01", "03", "04", "05", "06", "07", "08", "09", "12",
+    "2026", "2025", "2024", "026", "025", "024",
+}
+# 中文高频虚词、通用动词与无区分度抽象词
+_STOP_WORDS = {
+    "的", "了", "是", "在", "我", "你", "有", "和", "就", "不", "也",
+    "很", "都", "这", "那", "个", "们", "与", "或", "被", "把", "让", "说", "看",
+    "到", "去", "来", "会", "要", "能", "为", "以", "于", "之", "其", "该", "如",
+    "直接", "完整", "一起", "一样", "已经", "但是", "因为", "所以", "如果", "这个",
+    "那个", "什么", "怎么", "为什么", "可以", "应该", "必须", "时候", "现在", "知",
+    "道", "想起", "记得", "感觉", "觉得", "在家", "出来", "进去", "没有", "不是",
+    "铁律", "规则", "自己", "知道", "动作", "开口", "memory", "soul", "md",
+    "真实", "执行", "三条", "称呼", "瞬间", "跳过", "一直", "每次", "重复",
+    "明确", "必须", "不要", "不能", "需要", "记住", "真的", "什么", "时候",
+    "今天", "明天", "昨天", "最近", "现在", "以后", "之前", "一个", "一件",
+    "事情", "问题", "地方", "东西", "方法", "方式", "情况", "结果", "原因",
+    "目标", "状态", "记忆", "提醒", "检查", "确认", "验证", "发现",
+    "emory", "memor", "emor", "mory", "ory", "soul", "user", "Agent",
+    "bark", "tts", "api", "json", "http", "sdk", "cli",
+}
+def _shared_topic_words(a: str, b: str, df_stop=None):
+    """提取两段文本共有的 2~6 字语义片段（按标点切分意群，过滤停用词、数字与高频片段，长词吸收短词）。"""
     if not isinstance(a, str) or not isinstance(b, str):
         return []
-    a_l, b_l = a.lower(), b.lower()
-    shared = set()
-    for n in (2, 3, 4):
-        for j in range(len(a_l) - n + 1):
-            frag = a_l[j:j+n]
-            if frag in b_l:
-                shared.add(frag)
-    # 长词吸收短词：「打电话」出现时「电话」不重复计
+
+    _SEP = "。，、！？；：\n\t 　()[)（】】[]【】「」『』\"'～~!?;:,.…—-_/\\|"
+    def _segments(t):
+        out, cur = [], []
+        for ch in t:
+            if ch in _SEP:
+                if cur:
+                    out.append("".join(cur)); cur = []
+            else:
+                cur.append(ch)
+        if cur:
+            out.append("".join(cur))
+        return out
+
+    a_segs = _segments(a.lower())
+    b_segs = _segments(b.lower())
+
+    def _subwords(seg):
+        """从一个连续片段里切出所有 ≥2 字的子串（不跨标点），并过滤停用词。"""
+        res = set()
+        n = len(seg)
+        for ln in (2, 3, 4, 5, 6):
+            if ln > n:
+                break
+            for i in range(n - ln + 1):
+                w = seg[i:i+ln]
+                if w in _STOP_FRAGS or w in _STOP_WORDS:
+                    continue
+                if w.isdigit():
+                    continue
+                if w.isascii() and len(w) <= 3:
+                    continue
+                res.add(w)
+        return res
+
+    b_all = set()
+    for seg in b_segs:
+        b_all |= _subwords(seg)
+    a_all = set()
+    for seg in a_segs:
+        a_all |= _subwords(seg)
+    shared = a_all & b_all
+    # 按全库文档频率过滤高频无区分度片段（出现率 > 3% 的 2-gram）
+    if df_stop:
+        shared = {w for w in shared if w not in df_stop}
+    # 长词吸收短词：若长片段已命中，其子串不再重复计数
     deduped = {w for w in shared if not any(w != o and w in o for o in shared)}
     return sorted(deduped)
 
 
 def normalize_entity(entity, refs_dir, substring_match=False):
-    """把实体名映射到标准名。
-
-    === PATCH v2.8.3 === `substring_match` 默认关闭。
-    此前只要已有实体名是新实体名的子串就强行归并（len>=2 且 std in entity），
-    于是「读书笔记软件选型」被吞成「读书」、「运动损伤康复」被吞成「运动」——
-    两件完全不同的事被压成一条，语义永久丢失且不可逆；search 的查询词同样被改写，
-    导致精确查询召回一堆无关结果。现在只认 aliases.json / DEFAULT_ALIASES 里
-    **显式配置**的精确映射，绝不再做启发式子串归并。
-    """
+    """将实体名映射为标准实体名（基于 aliases.json 与 DEFAULT_ALIASES 精确映射；可选启用子串归并）。"""
     if not isinstance(entity, str):
         return entity
     alias_path = os.path.join(refs_dir, "aliases.json")
@@ -583,15 +571,15 @@ def normalize_entity(entity, refs_dir, substring_match=False):
                 return std
     return entity
 
-# === PATCH v2.6 B1 === 源 → 权威层
+# 来源 → 权威层级映射
 def authority_of(source):
     """file 层：file_import / user_explicit / auto_detect（默认视为文件侧沉淀）
-       self 层：self_inferred（agent 自身印象，仅补充）"""
+       self 层：self_inferred（Agent 自身印象，仅补充）"""
     if source == "self_inferred":
         return "self"
     return "file"
 
-# === PATCH v2.7 (人情味层) === 遗忘曲线 / 核心记忆工具
+# 遗忘曲线与核心记忆判定
 def _is_core(entry):
     """是否核心记忆：显式 core 字段优先；缺省时按 kind 推导（relationship/identity）。"""
     if not isinstance(entry, dict):
@@ -601,10 +589,11 @@ def _is_core(entry):
     return entry.get("kind") in CORE_KINDS
 
 def _days_since(entry, now):
-    """距离最近一次召回（或创建）的天数，用于遗忘衰减。"""
+    """计算距离最近一次被提及（last_mentioned，缺省回退 created）的天数，作为遗忘衰减的时间跨度。
+    仅 search 命中更新 last_mentioned；recall 的「想起」不更新该锚点。"""
     if not isinstance(entry, dict):
         return 0.0
-    ref = entry.get("last_recalled") or entry.get("created")
+    ref = entry.get("last_mentioned") or entry.get("created")
     if not ref or not isinstance(ref, str):
         return 0.0
     try:
@@ -613,12 +602,7 @@ def _days_since(entry, now):
         return 0.0
 
 def effective_importance(entry, now):
-    """当前有效权重：core 记忆恒为 1.0；其余按衰减公式计算。
-
-    === PATCH v2.8.3 === importance 走 _safe_float 兜底。旧库/手工编辑可能留下
-    importance=null 或 "高" 这类脏值，此前直接参与乘法会抛 TypeError 让整个
-    decay/search/stats 崩掉——一条脏记录毒死整个记忆库。
-    """
+    """计算当前有效权重：core 记忆恒为 1.0；非核心记忆按 DECAY_FACTOR ** days 指数衰减。"""
     if _is_core(entry):
         return 1.0
     imp = _safe_float(entry.get("importance", 1.0), 1.0)
@@ -629,20 +613,26 @@ def effective_importance(entry, now):
 # ──────────────────────────────────────────
 
 def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
-              source="auto_detect", confidence=1.0, emotion_tags=None, reason=None,
+              source="auto_detect", confidence=None, emotion_tags=None, reason=None,
               core=None, context=None, expires_at=None):
-    """完整 upsert 写入管线（PATCH v2.6: 归一化 + kind/sentiment + 源/情感/遗忘增强；
-    v2.9: context 情感锚点 + expires_at 到期时间）"""
-    # === v2.8.2 增量防线：entity 必填，杜绝新的缺 entity 记录（旧数据由 cmd_selfcheck 自愈） ===
+    """完整 upsert 写入管线（实体归一化、双源信任判定、全库冲突扫描、WAL 与成对备份）。
+
+    confidence 为必填项（[0, 1] 有限数）：
+      · 用户明说或有原文佐证 → 0.9~1.0（直接 active）
+      · Agent 自行推断无原话佐证 → 0.6~0.85（当 source=self_inferred 且 confidence ≤ 0.85 时挂 pending，
+        待同一事实被高置信或用户明说再次写入时自动转正为 active）
+    """
     if not entity or not str(entity).strip():
         raise ValueError("entity 必填且不能为空：记忆必须归属到具体实体（如 用户/读书/伴侣）")
     entity = str(entity)
-    # 校验 kind
     if etype not in ALLOWED_KINDS:
         raise ValueError(f"非法 kind='{etype}'，允许：{sorted(ALLOWED_KINDS)}")
-    # === PATCH v2.8.3 === confidence 必须是 [0,1] 有限数：
-    # NaN/Inf 会让 json.dump 产出裸 NaN 字面量（Python 能读、JS/Go 读不了）→ 记忆库变砖；
-    # 越界值会让 pending 阈值判断失真，故一并明确拒绝而非静默接受。
+    if confidence is None:
+        raise ValueError(
+            "confidence 必填：写记忆前先自己判断这条有没有依据。"
+            "用户亲口说的/文件查得到 → 0.9~1.0；自己推断但没原话佐证 → 0.6~0.85"
+            "（会自动挂 pending，不进检索；同一事实被用户本人再次明确写入时自动转正）；拿不准 → 先别写，去问用户。"
+        )
     confidence = _require_finite("confidence", confidence, CONFIDENCE_MIN, CONFIDENCE_MAX)
     value = _safe_str(value)
 
@@ -663,7 +653,7 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
     targets = ["memory.json"]
 
-    # === PATCH v2.3 === 写入前归一化
+    # 写入前执行实体别名归一化
     entity = normalize_entity(entity, refs_dir)
     kind = etype
 
@@ -675,28 +665,30 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
         mem_path = os.path.join(refs_dir, "memory.json")
         ei_path = os.path.join(refs_dir, "entity_index.json")
-        # === PATCH v2.8.3 === 损坏时自动隔离 + 从 .backup 恢复，绝不用空列表覆盖历史
         memory = read_json_typed(mem_path, list, refs_dir, "memory")
         ei = read_json_typed(ei_path, dict, refs_dir, "entity_index")
         if "entities" not in ei or not isinstance(ei.get("entities"), dict):
             ei = {"version": 1, "entities": {}}
 
-        existing_idx = None
         similar_idx = None
-        # === PATCH v3.2 (冲突扫描) === 不只查同 entity+kind——把扫描面扩大到
-        # 内容 bigram 相似的任何 active 记忆（跨 kind、跨 entity），供冲突报告用。
-        # 旧逻辑只查同 entity+kind，写到「电话链路」时完全看不见库里还有两条
-        # 同主题旧记忆（跨 entity/kind）——新旧规则并存，
-        # AI 一边记新规则一边残留旧规则（实测：新旧两套规则共存）。
-        _conflict_cands = []  # [(idx, bigram_sim, entry)] 跨 entity/kind 的相似 active 记忆
+        # 跨实体/跨类型全库相似记忆扫描（用于生成冲突报告，不自动作废旧记录）
+        _conflict_cands = []
+
+        # 预计算全库 active 记忆的 2-gram 文档频率，过滤出现率 > 3% 的高频片段
+        _df = {}
+        _active_vals = [_safe_str(e.get("value", "")) for e in memory
+                        if isinstance(e, dict) and _norm_status(e) == "active"]
+        _n_docs = max(1, len(_active_vals))
+        for _av in _active_vals:
+            for _frag in {_av[j:j+2] for j in range(len(_av) - 1)}:
+                _df[_frag] = _df.get(_frag, 0) + 1
+        _DF_MAX = 0.03
+        _df_stop = {f for f, c in _df.items() if c / _n_docs > _DF_MAX}
 
         for i, entry in enumerate(memory):
             if not isinstance(entry, dict):
-                continue  # 脏数据（字符串/数字混入）跳过，不让它毒死整条写入链
-            # === PATCH v3.2 === 跨 entity/kind 相似扫描（只做报告，不动写入路径）。
-            # 注意必须放在同 entity+kind 判断【之前】——那条路径命中后会 break 整个循环，
-            # 放后面就永远轮不到它跑（实测首条即同 entity 时扫描 0 次直接跳出）。
-            # 双通道：bigram 全局形状相似（≥0.30）或核心词重叠（≥2 个 2+ 字共有词）。
+                continue
+            # 跨实体/跨类型相似检测（双通道：bigram 相似度 ≥ 0.30 或共有主题词 ≥ 4 个）
             if _norm_status(entry) == "active":
                 old_val = _safe_str(entry.get("value", ""))
                 if len(old_val) >= 4 and len(value) >= 4:
@@ -705,15 +697,14 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                     inter = old_bg & new_bg
                     uni = old_bg | new_bg
                     sim = (len(inter) / len(uni)) if uni else 0.0
-                    # 核心词通道：bigram 对短语义重叠不敏感（实测 0.04 抓不住电话场景），
-                    # 用两边共有的 2+ 字片段做代理——「电话/打电话」这类主题词撞上即算。
-                    shared_kw = [w for w in _shared_topic_words(old_val, value) if len(w) >= 2]
-                    if sim >= 0.30 or len(shared_kw) >= 2:
-                        # 关键词通道命中时给个最低 sim 分，保证排序可见
+                    shared_kw = [w for w in _shared_topic_words(old_val, value, df_stop=_df_stop) if len(w) >= 2]
+                    if sim >= 0.30 or len(shared_kw) >= 4:
                         _conflict_cands.append((i, max(sim, 0.32), entry))
             e_kind = entry.get("kind") or entry.get("type")
             if entry.get("entity") == entity and e_kind == kind:
-                if _norm_status(entry) == "active":
+                # 同 entity+kind 下的幂等合并与转正匹配（同时覆盖 active 与 pending 状态）：
+                # 若内容完全相同或 bigram 重合度 > 0.7，则复用原记录合并更新；其余内容不同的记录新建共存。
+                if _norm_status(entry) in ("active", "pending"):
                     old_val = _safe_str(entry.get("value", ""))
                     if len(old_val) > 0 and old_val == value:
                         similar_idx = i
@@ -726,11 +717,9 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                         if union and len(intersection) / len(union) > 0.7:
                             similar_idx = i
                             break
-                    existing_idx = i
-                    break
 
-        # === PATCH v2.6 B1 === 自推断低置信 → pending（不进 active，防幻觉固化）
-        if source == "self_inferred" and confidence < SELF_INFERRED_PENDING_THRESHOLD:
+        # 双源信任状态判定：self_inferred 且 confidence ≤ 阈值时挂 pending，其余进 active
+        if source == "self_inferred" and confidence <= SELF_INFERRED_PENDING_THRESHOLD:
             init_status = "pending"
         else:
             init_status = "active"
@@ -742,28 +731,22 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
                 "type": etype,
                 "kind": kind,
                 "sentiment": sentiment,
-                "source": source,                 # === PATCH v2.6 B1 ===
-                "confidence": confidence,         # === PATCH v2.6 B1 ===
-                "emotion_tags": emotion_tags or [],  # === PATCH v2.6 B2 ===
+                "source": source,
+                "confidence": confidence,
+                "emotion_tags": emotion_tags or [],
                 "value": value,
                 "created": ts_now(),
                 "updated": ts_now(),
-                "last_recalled": None,            # === PATCH v2.6 A1 ===
+                "last_recalled": None,
                 "status": init_status,
                 "reason": reason,
-                # === PATCH v2.7 C1/C2 === 人情味层
                 "importance": 1.0,
                 "core": (kind in CORE_KINDS) if core is None else bool(core),
-                # === PATCH v2.9 === 情感锚点（当时的气氛）+ 到期时间
                 "context": _safe_str(context) or None,
                 "expires_at": _parse_expiry(expires_at),
             }
 
-        # === PATCH v2.8.3 (P0-1) === 幂等合并会复用旧记录的 id，因此**先定稿 memory_id
-        # 再写 WAL**。此前 WAL 在函数开头就用新生成的 id 写了 upsert，而合并分支随后把
-        # new_id 换成旧记录 id，commit 写的是旧 id → WAL 里永远躺着一条 (entity, 新id)
-        # 的孤儿 upsert。cmd_recover 认为它未提交就重放，重放又追加一对 upsert+commit，
-        # 于是每 recover 一次 WAL 就翻倍（实测 6→10→18→34），永远收敛不了。
+        # 幂等合并时先定稿复用原记录 id，再写入 WAL，保证 upsert 与 commit 的 memory_id 一致
         if similar_idx is not None:
             new_id = memory[similar_idx].get("id") or new_id
 
@@ -780,13 +763,17 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "emotion_tags": emotion_tags or [],
             "core": core,
             "reason": reason,
-            "context": _safe_str(context) or None,   # === PATCH v2.9 ===
-            "expires_at": _parse_expiry(expires_at), # === PATCH v2.9 ===
+            "context": _safe_str(context) or None,
+            "expires_at": _parse_expiry(expires_at),
             "memory_id": new_id,
             "targets": targets
         })
 
+        _pending_upgraded = False
+        _prev_old_value = None
         if similar_idx is not None:
+            # 覆盖前先记录原正文，供返回值 previous_value 回显
+            _prev_old_value = _safe_str(memory[similar_idx].get("value", ""))
             memory[similar_idx]["value"] = value
             memory[similar_idx]["updated"] = ts_now()
             memory[similar_idx]["id"] = new_id
@@ -802,19 +789,17 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             memory[similar_idx]["confidence"] = confidence
             if core is not None:
                 memory[similar_idx]["core"] = bool(core)
-        elif existing_idx is not None:
-            # 内容不同（如偏好翻转）→ 旧 active 标 superseded，新建
-            memory[existing_idx]["status"] = "superseded"
-            memory.append(_make_entry())
         else:
             memory.append(_make_entry())
+        # 待确认记录转正：若命中原 pending 记录且本次写入达到 active 标准，则自动升级为 active
+        if (similar_idx is not None and _norm_status(memory[similar_idx]) == "pending"
+                and init_status == "active"):
+            memory[similar_idx]["status"] = "active"
+            memory[similar_idx]["confirmed_at"] = ts_now()
+            memory[similar_idx]["confirm_reason"] = "同一事实被再次确认（user_explicit 或高置信重写）"
+            _pending_upgraded = True
 
         safe_write_json(mem_path, memory)
-
-        # === PATCH mirror_to_graph (v2.8 拆耦合: 默认零 sqlite3, 仅 graph 模式动态加载) ===
-        final_entry = next((e for e in memory if e.get("id") == new_id), None)
-        if final_entry:
-            _maybe_mirror_to_graph(final_entry, refs_dir)
 
         if entity not in ei["entities"]:
             ei["entities"][entity] = {
@@ -849,8 +834,7 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
         if not consistent:
             bkp_dir = os.path.join(refs_dir, ".backup")
-            # === v2.8.4 === 回滚取最新备份改用 mtime 排序（与 v2.8.3 _backup_candidates 一致），
-            # 不再用文件名排序（微秒/时区两种时间戳混排会错判新旧，'+' < '-'）。
+            # 按文件 mtime 取最新备份组执行成对回滚
             cands = _backup_candidates(bkp_dir, "memory")
             if cands:
                 latest = cands[0]
@@ -869,57 +853,80 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
             "memory_id": new_id
         })
 
-        # === PATCH v2.8.3 (3.3a) === write-through 备份：提交成功后立刻再拍一张快照。
-        # 此前只在写入「之前」备份，快照永远滞后一次写入——一旦 memory.json 损坏，
-        # 从备份恢复必然丢掉最后成功写入的那条记忆（实测 2 条→只回来 1 条）。
-        # 放在 commit 之后，保证 .backup 最新快照 == 最后一次确认落盘的状态。
-        # 注意：不能提前到 commit 之前，否则会破坏上面「回滚到最新备份」的语义。
+        # Write-through 备份：commit 成功后立即生成最新一致性快照
         try:
             backup_files(refs_dir)
         except Exception as e:
             sys.stderr.write(f"[memory] write-through 备份失败（不影响本次写入）：{e}\n")
 
-        # === PATCH v2.8.3 (3.4b) === 重新写入某实体 = 用户又要记它了，
-        # 必须把它从"已遗忘清单"里摘掉。否则会出现自相矛盾的状态：
-        # search 能召回这条记忆，suppressed_prompt.md 却仍在命令 AI「不要主动提及」。
+        # 重新写入某实体时同步解除其遗忘抑制状态（.suppressed.json 与 suppressed_prompt.md）
         _unsuppress_entity(refs_dir, entity)
 
-        # === PATCH v3.2 (冲突报告) === 落盘后把跨库相似记忆随返回值一起报出去，
-        # 让 AI 写新规则时立刻看见「库里还有旧规则」，主动问用户要不要一起作废。
-        # 只报不删——决定权在人和 AI 的对话里，不做静默代删。
+        # 生成跨库相似记忆冲突报告（排除本次写入自身）
         conflict_report = []
         try:
             for _i, _sim, _e in sorted(_conflict_cands, key=lambda x: -x[1])[:5]:
+                if _e.get("id") == new_id:
+                    continue
                 conflict_report.append({
                     "id": _e.get("id"),
                     "entity": _e.get("entity"),
                     "kind": _e.get("kind") or _e.get("type"),
                     "similarity": round(_sim, 3),
                     "value_preview": _safe_str(_e.get("value", ""))[:120],
+                    "_full_value": _safe_str(_e.get("value", "")),
                     "hint": "疑似新旧规则并存——考虑 memory_forget 这条或确认共存",
                 })
         except Exception:
             conflict_report = []
+
+        # 回显最终落盘正文与覆盖前旧值
+        _final = next((e for e in memory if e.get("id") == new_id), None) or {}
+        _final_value = _safe_str(_final.get("value", "")) or value
+        _prev_value = _prev_old_value
+
+        # 当最相似候选与新正文重合度 > 0.35 时生成用户确认问句（ask_user_this）
+        _ask_user_this = None
+        if conflict_report:
+            _ov = _jaccard(_bigrams(_final_value),
+                           _bigrams(conflict_report[0].get("_full_value") or ""))
+            if _ov > 0.35:
+                _ask_user_this = (
+                    "【只在确实疑似重复时转达，别的话自己判断，不要为无关条目打扰用户】\n"
+                    "用户，我刚记了一条：「" + _final_value[:70] + "」\n"
+                    "库里有一条相关的：「"
+                    + (conflict_report[0].get("value_preview") or "")[:70] + "」\n"
+                    "这条需不需要作废？还是都留着？（大多数情况都该留着——只有确实是"
+                    "同一件事的过时版本才作废）"
+                )
+
+        # 剥离内部临时字段
+        for _cr in conflict_report:
+            _cr.pop("_full_value", None)
 
         print(json.dumps({
             "status": "committed",
             "memory_id": new_id,
             "entity": entity,
             "kind": kind,
+            "value": _final_value,
+            "action": ("created" if similar_idx is None else "merged"),
+            "previous_value": _prev_value,
             "sentiment": sentiment,
             "source": source,
             "status_field": init_status,
+            "pending_upgraded": _pending_upgraded,
             "core": (kind in CORE_KINDS) if core is None else bool(core),
             "importance": 1.0,
-            "context": _safe_str(context) or None,     # === PATCH v2.9 ===
-            "expires_at": _parse_expiry(expires_at),   # === PATCH v2.9 ===
+            "context": _safe_str(context) or None,
+            "expires_at": _parse_expiry(expires_at),
             "mode": mode,
             "targets": targets,
-            # === PATCH v3.2 ===
             "conflict_scan": {
                 "similar_count": len(_conflict_cands),
-                "conflicts": conflict_report,
-                "note": "相似度≥0.30 的跨库旧记忆，命中即问：『这条旧记忆要不要一起作废？』",
+                "conflicts": conflict_report[:3],
+                "ask_user_this": _ask_user_this,
+                "note": "相似度≥0.30 的跨库旧记忆，主题撞上即须裁定留或废",
             },
         }, ensure_ascii=False))
 
@@ -928,19 +935,11 @@ def cmd_write(entity, etype, value, refs_dir, mode=None, sentiment=None,
 
 
 def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
-    """=== PATCH v2.6 A1 + v2.7 C2 === 检索命中后戳 last_recalled，并对非 core 记忆
-       应用遗忘衰减 importance *= DECAY_FACTOR ** days_since_last_recalled。
-
-    === PATCH v2.8.3 (P0-3) === 整个 read-modify-write 必须在文件锁内完成。
-    此前 search 在锁外读盘、改内存、再整体写回，与并发的 write 相互覆盖：
-    write 刚落盘的新记录会被 search 手里的旧快照抹掉。实测 3 写 + 3 搜并发，
-    期望 29 条只剩 16 条，**丢失 45%**。加锁后读到的一定是最新快照。
-
-    === 修复 (finding #10) === 返回 {id: {"importance":..., "last_recalled":...}} 的
-    逐条更新，供 cmd_search 把衰减/戳记结果回填到自己的输出里。此前 search 在调用
-    _touch_recalled *之前* 就把 entry 快照拼好，_touch_recalled 改的是磁盘上的另一份
-    副本，导致返回给调用方的 entry 永远是"触碰前"的快照（last_recalled 恒为 null、
-    importance 未衰减）——即真正发生了召回，结果却说没发生。
+    """更新 search 命中条目的召回与提及状态（想起 ≠ 提及）：
+      · last_recalled 刷新为当前时间（供 24h 去重抑制）
+      · last_mentioned 刷新为当前时间（作为遗忘衰减锚点）
+      · 非核心记忆的 importance 重置为 1.0（被重新提及即恢复鲜活度）
+    recall 工具仅标记 last_recalled，不调用本函数。
     """
     if not hit_ids:
         return {}
@@ -956,10 +955,11 @@ def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
                 continue
             if e.get("id") in hit and _norm_status(e) == "active":
                 if not _is_core(e):
-                    days = _days_since(e, now)
-                    cur = _safe_float(e.get("importance", 1.0), 1.0)
-                    e["importance"] = round(cur * (DECAY_FACTOR ** days), 6)
+                    # 重新被提起 = 尚未过时：衰减清账，回到满分重新计息。
+                    # 若某条已被反复沉淀成核心事实，可由 cmd_decay 显式压回，不走这里。
+                    e["importance"] = 1.0
                 e["last_recalled"] = now.isoformat(timespec="seconds")
+                e["last_mentioned"] = e["last_recalled"]  # 同一时刻：search 命中即提及
                 # 同一 id 在多源检索里可能出现多次，统一以磁盘最终态为准
                 updates[e["id"]] = {
                     "importance": e["importance"],
@@ -974,8 +974,7 @@ def _touch_recalled(refs_dir, mem_path, hit_ids, now=None):
 
 
 def cmd_search(query, refs_dir):
-    """本地检索；PATCH v2.6: 仅返回 active，标注 authority + supplement"""
-    # === PATCH v2.8.3 (3.5b) === 查询词不再被子串归一化改写（见 normalize_entity 注释）
+    """本地关键词与多词模糊检索：仅返回 active 记忆，按权威层、匹配度与有效权重排序，并执行 72h 展示冷却。"""
     query = _safe_str(query)
     query = normalize_entity(query, refs_dir)
 
@@ -989,23 +988,17 @@ def cmd_search(query, refs_dir):
 
     results = []
 
-    # === PATCH v2.8.3 (3.5c) === 空/纯空白查询直接返回空。
-    # 此前 "" in val.lower() 恒为 True，一个空 query 就把整库（含 identity 等隐私记忆）
-    # 全量倒出，等同于无差别信息泄露。
+    # 空查询或纯空白查询直接返回空结果
     if not query.strip():
         print(json.dumps({"query": query, "results_count": 0, "results": []}, ensure_ascii=False, indent=2))
         return
 
     q = query.lower()
 
-    # === PATCH v3.2 (模糊检索) === 多词查询按词命中数排序，不再要求整串子串全命中。
-    # 旧逻辑 `q in val`：搜「a b c」必须三个词按顺序连着出现才能命中——
-    # 中文复合查询召回率≈0（实测：库里明明有电话桥记忆，三词连搜返回 0 条）。
-    # 新逻辑：拆词后逐词匹配 value/entity，按命中词数加权排序，多词查询也能召回。
-    # 词间用空格/顿号分隔；单字词也参与匹配（中文没有天然空格分词）。
+    # 多词查询拆分：支持按空格/逗号/顿号分词并按命中词数比例计分
     _q_terms = [t for t in _split_terms(query) if t]
     if not _q_terms:
-        _q_terms = [q]  # 空拆分兜底：按整串处理
+        _q_terms = [q]
 
     if query in ei.get("entities", {}):
         ent = ei["entities"].get(query) or {}
@@ -1014,7 +1007,6 @@ def cmd_search(query, refs_dir):
             for entry in memory:
                 if not isinstance(entry, dict):
                     continue
-                # === PATCH v2.6 B1 === 只回 active；pending/superseded 不进检索（防幻觉固化/已遗忘漏网）
                 if entry.get("id") == mid and entry.get("entity") == query and _norm_status(entry) == "active":
                     results.append({
                         "source": "entity_index",
@@ -1024,17 +1016,13 @@ def cmd_search(query, refs_dir):
                     break
 
     for entry in memory:
-        # === PATCH v2.8.3 (P1) === 全部字段走 .get + _safe_str：
-        # 旧库里缺 entity / 缺 id / value=null 的记录此前会让 search 直接
-        # KeyError / AttributeError 崩掉，一条脏记录就让整个检索不可用。
         if not isinstance(entry, dict):
             continue
         if _norm_status(entry) != "active":
             continue
         val = _safe_str(entry.get("value", "")).lower()
         ent_name = _safe_str(entry.get("entity", "")).lower()
-        # === PATCH v3.2 (模糊检索) === 单词直命中（保留旧精确路径）；
-        # 多词：逐词找，命中数>0 即入池，按命中比例打分。
+        # 单词精确子串匹配或多词比例匹配
         if len(_q_terms) == 1 and q in val or q in ent_name:
             eid = entry.get("id")
             if eid is None or not any(r["entry"].get("id") == eid for r in results):
@@ -1056,60 +1044,103 @@ def cmd_search(query, refs_dir):
                         "_fuzzy_total": len(_q_terms),
                     })
 
-    # === PATCH v2.6 B3 === 源排序 + 冲突 supplement 标记
+    # 标注权威层（file / self）与多源补充标记（supplement）
     for r in results:
         r["authority"] = authority_of(r["entry"].get("source", "auto_detect"))
-    # file 权威优先；同实体多源 → self 侧标 supplement
     file_entities = {_safe_str(r["entry"].get("entity", "")) for r in results if r["authority"] == "file"}
     for r in results:
         r["supplement"] = (r["authority"] == "self" and _safe_str(r["entry"].get("entity", "")) in file_entities)
-    # === PATCH v2.7 C3 === 按"权威优先 + effective_importance 降序"排序（core 记忆恒靠前）
+    # 排序优先级：文件权威层优先 → 匹配度降序 → 有效权重（effective_importance）降序
     now = datetime.now(TZ)
     for r in results:
         r["_eff_imp"] = effective_importance(r["entry"], now)
-    results.sort(key=lambda r: (0 if r["authority"] == "file" else 1, -r["_eff_imp"]))
+        if r["source"] == "keyword_fuzzy":
+            r["_match"] = r.get("_fuzzy_hits", 1) / max(1, r.get("_fuzzy_total", 1))
+        elif r["source"] == "keyword":
+            r["_match"] = 0.95
+        else:  # entity_index
+            r["_match"] = 1.0
+    results.sort(key=lambda r: (0 if r["authority"] == "file" else 1,
+                                -r["_match"], -r["_eff_imp"]))
 
-    # === PATCH v2.6 A1 + v2.7 C2 === 命中即戳 last_recalled + 衰减
+    # 72 小时展示冷却：读取 .shown_log.json，优先返回未在冷却窗口内的条目；全部冷却时按序回填兜底
+    _shown_path = os.path.join(refs_dir, ".shown_log.json")
+    _shown = {}
+    try:
+        _shown = json.loads(open(_shown_path, encoding="utf-8").read())
+        if not isinstance(_shown, dict):
+            _shown = {}
+    except Exception:
+        _shown = {}
+    _now_epoch = time.time()
+    _COOLDOWN_S = 72 * 3600
+    def _is_cooled(eid):
+        ts = _shown.get(eid)
+        return isinstance(ts, (int, float)) and (_now_epoch - ts) < _COOLDOWN_S
+    _DISPLAY = 5
+    _fresh_sorted = [r for r in results if not _is_cooled(r["entry"].get("id"))]
+    _cooled_sorted = [r for r in results if _is_cooled(r["entry"].get("id"))]
+    if _fresh_sorted:
+        results = _fresh_sorted[:_DISPLAY]
+    else:
+        results = _cooled_sorted[:_DISPLAY]
+
+    # 仅对实际展示的条目（前 5 条）更新提及状态与冷却记录
     hit_ids = [r["entry"].get("id") for r in results if r["entry"].get("id")]
     touch_updates = _touch_recalled(refs_dir, mem_path, hit_ids, now)
+    for uid in hit_ids:
+        _shown[uid] = _now_epoch
+    try:
+        # 保留最近 7 天的展示记录
+        _shown = {k: v for k, v in _shown.items()
+                  if isinstance(v, (int, float)) and (_now_epoch - v) < 7 * 86400}
+        tmp = _shown_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_shown, fh, ensure_ascii=False)
+        os.replace(tmp, _shown_path)
+    except Exception:
+        pass
 
     out = []
     for r in results[:5]:
         e = dict(r["entry"])
-        # === 修复 (finding #10) === 把磁盘上已落定的衰减/戳记结果回填进输出，
-        # 否则调用方拿到的永远是"触碰前"的快照（last_recalled=null、importance 未衰减）。
         uid = e.get("id")
         if uid in touch_updates:
             e["last_recalled"] = touch_updates[uid]["last_recalled"]
             e["importance"] = touch_updates[uid]["importance"]
-        e["_authority"] = r["authority"]
-        e["_supplement"] = r["supplement"]
-        e["_match_source"] = r["source"]
-        # _importance 以回填后的值重算，保证与 entry 内 importance 一致（衰减后更低）
-        e["_importance"] = round(effective_importance(e, now), 4)
-        e["_core"] = _is_core(e)
-        out.append(e)
+        # 精简输出字段，仅保留核心契约字段以节省上下文开销
+        slim = {
+            "id": e.get("id"),
+            "entity": e.get("entity"),
+            "kind": e.get("kind") or e.get("type"),
+            "value": e.get("value"),
+            "authority": r.get("authority"),
+            "emotion_tags": e.get("emotion_tags"),
+            "core": _is_core(e),
+            "importance": round(effective_importance(e, now), 2),
+            "match": r["source"],
+        }
+        if e.get("status") != "active":
+            slim["status"] = e.get("status")
+        out.append(slim)
 
     print(json.dumps({
         "query": query,
         "results_count": len(results),
         "results": out
-    }, ensure_ascii=False, indent=2))
+    }, ensure_ascii=False))
 
 
-# === v2.8.2 存量防线：扫描并自愈缺 entity 的旧记录 ===
+# 存量数据自检与自愈
 
 def _norm_status(e):
-    """读路径 status 归一：缺省/空 -> active（向后兼容 v2.9 前无 status 字段的存量库）。
-    已带 status 的（active / denied / pending / superseded / confirmed / ...）原样保留，不改变原语义。"""
+    """读取路径 status 归一化：缺省或空值视为 active，显式状态原样保留。"""
     st = e.get("status") if isinstance(e, dict) else None
     return st or "active"
 
 
 def cmd_selfcheck(refs_dir):
-    """扫描 memory.json，修复 entity 缺失/为空的旧记录（早期手写入库、entity 尚未必填时留下）。
-    对缺 entity 的记录按 value 首行派生实体名自动补全（value 也为空则记为 '(未知实体)'），
-    写回并打印 WARNING 日志；已带 entity 的不动。返回修复摘要。"""
+    """扫描 memory.json，自动补全缺失/空 entity 字段与缺省 status 字段，返回修复摘要。"""
     mem_path = os.path.join(refs_dir, "memory.json")
     # 注意：这里刻意不传 refs_dir/stem —— selfcheck 是只读体检，不应触发备份回滚副作用
     memory = read_json_typed(mem_path, list)
@@ -1175,7 +1206,7 @@ def cmd_stats(refs_dir):
         t = e.get("kind") or e.get("type", "general")
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    # === PATCH v2.7 C2/C3 === 核心记忆 / 平均权重 / 最弱记忆排行
+    # 核心记忆数 / 非核心平均权重 / 最弱记忆排行
     now = datetime.now(TZ)
     core_count = sum(1 for m in memory if _norm_status(m) == "active" and _is_core(m))
     noncore = [m for m in memory if _norm_status(m) == "active" and not _is_core(m)]
@@ -1187,7 +1218,7 @@ def cmd_stats(refs_dir):
 
     timestamps = sorted(_safe_str(m.get("created", "")) for m in memory if m.get("created"))
 
-    # === PATCH v2.6 A3 === 最久未召回排行（last_recalled 为空退回 created）
+    # 最久未召回排行（last_recalled 为空时回退 created 计算）
     stale = []
     for m in memory:
         if _norm_status(m) != "active":
@@ -1220,8 +1251,7 @@ def cmd_stats(refs_dir):
 
 
 def cmd_decay(refs_dir):
-    """=== PATCH v2.7 C2 === 梦境周期：对全部 active 非 core 记忆统一应用遗忘衰减。
-       可定期跑（如每周巡检），让久不提的记忆慢慢淡化，重要的被反复唤起而保持。"""
+    """梦境周期：对全部 active 且非 core 的记忆统一应用艾宾浩斯遗忘衰减。"""
     mem_path = os.path.join(refs_dir, "memory.json")
     fd = file_lock(refs_dir)
     try:
@@ -1234,7 +1264,6 @@ def cmd_decay(refs_dir):
             if _norm_status(e) != "active" or _is_core(e):
                 continue
             days = _days_since(e, now)
-            # === PATCH v2.8.3 === importance 脏值（null / "高"）不再让整库 decay 崩溃
             cur = _safe_float(e.get("importance", 1.0), 1.0)
             new = round(cur * (DECAY_FACTOR ** days), 6)
             if new != cur:
@@ -1269,9 +1298,7 @@ def cmd_vacuum(refs_dir):
                 retained.append(entry)
                 continue
             if entry.get("status") == "superseded":
-                # === PATCH v2.8.3 (P1) === created 缺失或格式非法不再抛
-                # KeyError/ValueError 让整个 vacuum 崩掉；无法判断年龄的记录一律
-                # 保守保留（宁可不清理，也绝不误删或中断维护流程）。
+                # created 缺失或无法解析时保守保留，避免误归档
                 raw_created = entry.get("created")
                 created = None
                 if isinstance(raw_created, str):
@@ -1285,9 +1312,7 @@ def cmd_vacuum(refs_dir):
             retained.append(entry)
 
         if to_archive:
-            # === PATCH v2.8.3 (P0-6) === 同日多次 vacuum 必须**合并**而不是覆盖。
-            # 此前归档名只到日期（memory_YYYYMMDD.json），当天第二次 vacuum 直接
-            # 覆写，上一批归档数据永久丢失。现在先读回已有归档再追加。
+            # 按日期归档并支持同日多次归档增量合并去重
             date_str = now.strftime("%Y%m%d")
             archive_path = os.path.join(archive_dir, f"memory_{date_str}.json")
             existing = read_json_typed(archive_path, list)
@@ -1311,8 +1336,7 @@ def cmd_backup(refs_dir):
 
 
 def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
-    """=== PATCH v2.6 B4 === 双向遗忘：记忆标 superseded + 写 .suppressed.json
-       + 生成 suppressed_prompt.md（让 agent 自身也"放下"）"""
+    """双向遗忘：将匹配记忆标记为 superseded，并写入 .suppressed.json 与 suppressed_prompt.md。"""
     fd = file_lock(refs_dir)
     try:
         mem_path = os.path.join(refs_dir, "memory.json")
@@ -1342,10 +1366,7 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
 
         safe_write_json(mem_path, memory)
 
-        # 写 .suppressed.json
-        # === PATCH v2.8.3 (3.4d) === 按 (entity, kind) 去重。此前每次 forget 都无脑
-        # append，反复遗忘同一实体会让 suppressed_prompt.md 里堆出成排重复的
-        # 「不要主动提及 X」，白白挤占 AI 的系统提示词预算。
+        # 按 (entity, kind) 去重写入 .suppressed.json
         supp_path = os.path.join(refs_dir, ".suppressed.json")
         supp = read_json_typed(supp_path, dict)
         if not isinstance(supp.get("suppressed"), list):
@@ -1365,7 +1386,7 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
             })
         safe_write_json(supp_path, supp)
 
-        # 生成 suppressed_prompt.md（供贴进 agent 系统提示 / SOUL）
+        # 生成 suppressed_prompt.md（供贴进 Agent 系统提示 / SOUL）
         _regen_suppressed_prompt(refs_dir, supp)
 
         print(json.dumps({
@@ -1379,15 +1400,12 @@ def cmd_forget(entity_or_id, refs_dir, reason=None, kind=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-# === PATCH v2.9 === 人情味增强四件套：否认降权 / 到期记忆 / 主动回忆 / 承诺追踪
+# 否认降权 / 到期记忆 / 主动回忆 / 承诺追踪
 # ═══════════════════════════════════════════════════════════════
 
 def cmd_deny(entity_or_id, refs_dir, reason=None):
-    """=== PATCH v2.9 (否认降权闭环) === 用户否认一条记忆 → 立即大幅降权并记录。
-
-    这是"被记住"的信任修复机制：用户纠正过的事（"我早不喝无糖了"）绝不能再
-    自信地排在最前。首次否认 importance ×DENY_FACTOR（0.1）；累积 DENY_TO_PENDING_AFTER
-    （2）次 → 直接转 pending（彻底退出检索，需重新写入确认才复活）。"""
+    """否认降权：用户否认/纠正某条记忆时将其 importance 乘以 DENY_FACTOR（0.1）并累加 deny_count；
+    累计达到 DENY_TO_PENDING_AFTER（2）次时自动转为 pending 退出检索。"""
     fd = file_lock(refs_dir)
     try:
         mem_path = os.path.join(refs_dir, "memory.json")
@@ -1436,9 +1454,8 @@ def cmd_deny(entity_or_id, refs_dir, reason=None):
 
 
 def cmd_expire_check(refs_dir):
-    """=== PATCH v2.9 (到期记忆) === 扫描带 expires_at 的记忆：
-    已到期 → 状态标 expired（移出 active，不再被检索召回，数据保留）；
-    未来 EXPIRY_REMIND_DAYS 天内到期 → 列入 remind（供主动提醒兑现/提及）。"""
+    """到期记忆扫描：已到期的记忆标记为 expired（移出检索，保留数据）；
+    未来 EXPIRY_REMIND_DAYS 天内到期的记忆列入 remind 提醒列表。"""
     fd = file_lock(refs_dir)
     try:
         mem_path = os.path.join(refs_dir, "memory.json")
@@ -1491,22 +1508,28 @@ def cmd_expire_check(refs_dir):
         file_unlock(fd, refs_dir)
 
 
-def cmd_recall(refs_dir, limit=3, recent_hours=None):
-    """=== PATCH v2.9 (主动回忆触发器) === 从记忆库里挑出"值得此刻想起的"几条。
+def cmd_recall(refs_dir, limit=3, recent_hours=None, tags=None, tag_mode="any"):
+    """主动回忆触发器：从记忆库中挑出此刻值得想起的记忆。
 
-    双通道设计（修复"被遗忘的反而排不上号"的矛盾）：
-      · 温热通道 —— 常提/核心记忆，按 effective_importance（+情绪偏好）排。
-      · 旧事重提通道 —— 冷掉的记忆单独捞，评分看【从没提过 + 带气氛 + 快到期 + 曾经很重要】。
-    排序偏好：情绪标签里【甜弹药】（甜蜜/温暖/想念//撒娇/激动/关心/害羞）排前，
-      【关心类】（委屈/担心/生气/疲惫）次之，平淡/严肃不加分。
-    最近使用抑制：非核心记忆刚被 recall 过（< recent_hours，默认 24h）直接踢出池子，
-      否则同一条（如白茶暗号）一天会被翻几十次。"""
+    双通道机制：
+      · 温热通道：核心记忆、近期入库（< 30 天）或近期被想起过（< 7 天）的记忆，按有效权重 + 情绪标签偏好排序。
+      · 旧事重提通道：入库满 30 天且距上次被想起满 7 天的非核心记忆，按沉默天数（距上次提及天数）主导排序，
+        辅以从未提及、临期与初始置信度加成。
+    去重抑制与定向召回：
+      · 常规召回下，recent_hours（默认 24h）内被 recall 过的记忆暂不入池，召回后刷新 last_recalled（不改 importance 与 last_mentioned）。
+      · 传入 tags 定向召回时，自动关闭 24h 抑制且不刷新 last_recalled，双通道合并按分排序输出。
+    """
     mem_path = os.path.join(refs_dir, "memory.json")
     memory = read_json_typed(mem_path, list, refs_dir, "memory")
     now = datetime.now(TZ)
-    COLD_DAYS = 90  # 距上次召回超过此天数 → 视为"冷掉的旧事"
+    COLD_DAYS = RECALL_COLD_AGE_DAYS
     if recent_hours is None:
         recent_hours = RECALL_RECENCY_HOURS
+    # 定向标签过滤（any=命中任一，all=须全部命中）
+    _tag_filter = None
+    if tags:
+        _tag_filter = {str(t).strip() for t in tags if str(t).strip()} or None
+    _tag_all = str(tag_mode or "any").lower() == "all"
 
     warm = []
     cold = []
@@ -1515,6 +1538,13 @@ def cmd_recall(refs_dir, limit=3, recent_hours=None):
             continue
         if _norm_status(e) != "active":
             continue
+        e_tags = {str(t).strip() for t in (e.get("emotion_tags") or []) if str(t).strip()}
+        if _tag_filter is not None:
+            if _tag_all:
+                if not _tag_filter.issubset(e_tags):
+                    continue
+            elif not (_tag_filter & e_tags):
+                continue
         imp = effective_importance(e, now)
         never = not e.get("last_recalled")
         tags = e.get("emotion_tags") or []
@@ -1529,20 +1559,33 @@ def cmd_recall(refs_dir, limit=3, recent_hours=None):
                     expiring = True
             except (ValueError, TypeError):
                 pass
-        # 冷热度：core 恒温；其余按距上次召回天数
-        cold_days = 0
-        if not _is_core(e):
-            ref = e.get("last_recalled") or e.get("created")
-            if ref and isinstance(ref, str):
-                try:
-                    cold_days = max(0.0, (now - ts_parse(ref)).total_seconds() / 86400.0)
-                except (ValueError, TypeError):
-                    cold_days = 0
-        # 最近使用抑制：只要被 recall 过且还在冷却窗内（默认24h）就踢出池子，
-        #   核心记忆（如白茶暗号）也同样抑制，否则同一条一天翻几十次
+        # 计算入库天数（age_days）与距上次被想起天数（recall_gap_days）
+        age_days = 0
+        created = e.get("created")
+        if created and isinstance(created, str):
+            try:
+                age_days = max(0.0, (now - ts_parse(created)).total_seconds() / 86400.0)
+            except (ValueError, TypeError):
+                age_days = 0
+        recall_gap_days = age_days
+        _lr = e.get("last_recalled")
+        if _lr and isinstance(_lr, str):
+            try:
+                recall_gap_days = max(0.0, (now - ts_parse(_lr)).total_seconds() / 86400.0)
+            except (ValueError, TypeError):
+                recall_gap_days = age_days
+        # 计算沉默天数（距上次被 search 真提及的天数；仅 recall 想起不更新 last_mentioned）
+        silent_days = recall_gap_days
+        _lm = e.get("last_mentioned")
+        if _lm and isinstance(_lm, str):
+            try:
+                silent_days = max(0.0, (now - ts_parse(_lm)).total_seconds() / 86400.0)
+            except (ValueError, TypeError):
+                silent_days = recall_gap_days
+        # 24h 近期召回抑制（定向标签召回时不启用抑制）
         recent_h = None
         lr = e.get("last_recalled")
-        if lr and isinstance(lr, str):
+        if _tag_filter is None and lr and isinstance(lr, str):
             try:
                 recent_h = (now - ts_parse(lr)).total_seconds() / 3600.0
             except (ValueError, TypeError):
@@ -1560,19 +1603,28 @@ def cmd_recall(refs_dir, limit=3, recent_hours=None):
             "expires_at": e.get("expires_at"),
             "last_recalled": e.get("last_recalled"),
             "importance": round(imp, 4),
-            "cold_days": round(cold_days, 1),
+            "age_days": round(age_days, 1),
+            "recall_gap_days": round(recall_gap_days, 1),
+            "_last_recalled_short": _short_ts(e.get("last_recalled")),
         }
-        if _is_core(e) or cold_days < COLD_DAYS:
-            item["score"] = round(imp + emo_boost, 4)  # 温热：记得牢 + 情绪偏好
+        # 使用简短时间格式并移除空值字段以紧凑输出
+        item.pop("last_recalled", None)
+        for _k in ("expires_at", "context"):
+            if item.get(_k) is None:
+                item.pop(_k, None)
+        # 通道分流：核心记忆、入库未满 30 天或距上次 recall 未满 7 天走温热通道，其余走旧事重提通道
+        if _is_core(e) or age_days < COLD_DAYS or recall_gap_days < RECALL_GAP_DAYS:
+            item["score"] = round(imp + emo_boost, 4)
             item["recall_reason"] = "常聊的，正在心头"
             warm.append(item)
         else:
-            # 旧事重提：衰减后的 importance 不作主键，改看"值不值得捞回来"
-            score = (RECALL_BONUS_NEVER if never else 0) \
-                + emo_boost \
+            # 旧事重提通道评分：以沉默天数为主键，附加从未提及、临期与置信度权重
+            score = min(silent_days / 30.0, 10.0) \
+                + (RECALL_BONUS_NEVER if never else 0) \
                 + (RECALL_BONUS_EXPIRING if expiring else 0) \
                 + (0.25 * max(0.0, min(1.0, _safe_float(e.get("confidence", 1.0), 1.0))))
             item["score"] = round(score, 4)
+            item["silent_days"] = round(silent_days, 1)
             if never:
                 item["recall_reason"] = "从没跟你提起过的旧事"
             elif expiring:
@@ -1587,22 +1639,598 @@ def cmd_recall(refs_dir, limit=3, recent_hours=None):
 
     warm.sort(key=lambda x: -x["score"])
     cold.sort(key=lambda x: -x["score"])
-    # 混合：温热至多 1 条（保持"常聊的稳"，但不让它霸占全部），其余名额留给旧事重提
-    results = []
-    if warm:
-        results.append(warm[0])
-    results += cold[: max(0, limit - len(results))]
-    if len(results) < limit:
-        results += warm[1: limit - len(results)]
+    if _tag_filter is not None:
+        # 定向标签召回：合并温热与旧事通道按得分排序
+        results = sorted(warm + cold, key=lambda x: -x["score"])[:limit]
+    else:
+        # 常规混合输出：温热通道至多占 1 条，其余名额优先分配给旧事重提通道，不足时由温热通道补齐
+        results = []
+        if warm:
+            results.append(warm[0])
+        results += cold[: max(0, limit - len(results))]
+        if len(results) < limit:
+            results += warm[1: 1 + (limit - len(results))]
+
+    # 常规召回完成后刷新被召回条目的 last_recalled（不修改 importance 与 last_mentioned；定向标签召回不刷新）
+    recalled_ids = {r.get("id") for r in results if r.get("id")}
+    if recalled_ids and _tag_filter is None:
+        changed = False
+        for e in memory:
+            if isinstance(e, dict) and e.get("id") in recalled_ids:
+                e["last_recalled"] = ts_now()
+                changed = True
+        if changed:
+            safe_write_json(mem_path, memory)
 
     print(json.dumps({
         "status": "recalled",
         "count": len(results),
         "recency_hours": recent_hours,
+        "tags": sorted(_tag_filter) if _tag_filter else [],
+        "tag_mode": "all" if _tag_all else "any",
         "channel": {"warm": len(warm), "old_treasure": len(cold)},
         "results": results,
     }, ensure_ascii=False, indent=2))
 
+
+# ---- 自我进化（自省复盘）----
+# 机制：按四档优先级（教训/负面 > 里程碑/身份 > 偏好/情绪 > 日常事实）交织轮转并提供批内配额，
+# 自动维护分页游标（.evolve_cursor.json），单批默认 50 条（上限 300 条，带 6 万字符上下文守卫）。
+# 产物由 LLM 经 memory_evolve_check 校验后写入宿主常驻记忆文件，本函数只读不修改 memory.json。
+SELF_EVOLVE_DEFAULT_LIMIT = 50
+SELF_EVOLVE_DEFAULT_DAYS = 365
+SELF_EVOLVE_CHAR_BUDGET = 60000
+SELF_EVOLVE_MAX_LIMIT = 300
+
+
+def cmd_self_evolve(refs_dir, limit=SELF_EVOLVE_DEFAULT_LIMIT, focus=None,
+                    days=SELF_EVOLVE_DEFAULT_DAYS, cursor=None):
+    """自省复盘：按四档配额与自动游标轮批提取 active 记忆供 LLM 复盘（只读，不修改 memory.json）。
+
+    focus: 可选定向标签集合（仅提取含指定标签的记忆）。
+    days: 提取最近 N 天内的记忆（默认 365）。
+    limit: 单批提取上限（默认 50，上限 300，受 SELF_EVOLVE_CHAR_BUDGET 字符预算守卫约束）。
+    cursor: 分页游标；为 None 时自动读取并推进 .evolve_cursor.json，传整数时按指定位置读取。
+    """
+    mem_path = os.path.join(refs_dir, "memory.json")
+    memory = read_json_typed(mem_path, list, refs_dir, "memory")
+    now = datetime.now(TZ)
+    # 显式 None 判断，不用 `or`：limit=0/days=0 是合法输入（0 天 = 只看今天的），
+    # `or` 会把 0 当成"没传"而悄悄兜底成默认值——调用方以为要 0，实际拿到 300。
+    limit = SELF_EVOLVE_DEFAULT_LIMIT if limit is None else int(limit)
+    limit = max(1, min(SELF_EVOLVE_MAX_LIMIT, limit))
+    days = SELF_EVOLVE_DEFAULT_DAYS if days is None else int(days)
+    days = max(0, days)
+    _focus = {str(t).strip() for t in (focus or []) if str(t).strip()} or None
+
+    pool = []
+    for e in memory:
+        if not isinstance(e, dict) or _norm_status(e) != "active":
+            continue
+        e_tags = {str(t).strip() for t in (e.get("emotion_tags") or []) if str(t).strip()}
+        if _focus and not (_focus & e_tags):
+            continue
+        created = e.get("created")
+        if not created or not isinstance(created, str):
+            continue
+        try:
+            age = (now - ts_parse(created)).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            continue
+        if age > days:
+            continue
+        silent = age
+        lm = e.get("last_mentioned")
+        if lm and isinstance(lm, str):
+            try:
+                silent = max(0.0, (now - ts_parse(lm)).total_seconds() / 86400.0)
+            except (ValueError, TypeError):
+                silent = age
+        pool.append({
+            "id": e.get("id"),
+            "entity": e.get("entity"),
+            "kind": e.get("kind"),
+            "value": _safe_str(e.get("value")),
+            "context": e.get("context"),
+            "emotion_tags": e.get("emotion_tags"),
+            "importance": round(effective_importance(e, now), 4),
+            "core": bool(_is_core(e)),
+            "age_days": round(age, 1),
+            "silent_days": round(silent, 1),
+            "recall_reason": None,
+        })
+
+    # 排序：**全量进池，不筛标签**（人复盘不可能只想坏事——
+    # 让用户开心的事、惊喜的事、偏好，全是「我是谁/该怎么对 TA」的原料）。
+    # 只分「优先级」不分「资格」：
+    #   P0 教训/负面情绪（做错了要改）
+    #   P1 里程碑/身份/关系（用户是谁、我们在哪）
+    #   P2 偏好/习惯（用户喜欢什么，可直接复用）
+    #   P3 其余日常事实
+    # 同档内沉默越久越优先（久没人提 = 最可能被忽略的）。
+    _LESSON_TAGS = {"教训", "委屈", "失望", "心疼", "生气", "内疚", "愧疚", "被纠正", "担心", "疲惫"}
+    _IDENTITY_TAGS = {"里程碑", "新突破", "身份", "重要", "核心偏好", "爱意", "被信任", "认真"}
+    _PREF_TAGS = {"甜蜜", "温暖", "想念", "撒娇", "激动", "关心", "害羞", "期待", "心情", "健康"}
+    def _prio(it):
+        tags = set(it.get("emotion_tags") or [])
+        if tags & _LESSON_TAGS:
+            return 0
+        if tags & _IDENTITY_TAGS:
+            return 1
+        if tags & _PREF_TAGS:
+            return 2
+        return 3
+    def _rv_key(it):
+        return (_prio(it), -it.get("silent_days", 0.0))
+    _prio_label = {
+        0: "教训/负面情绪——做错了要改",
+        1: "里程碑/身份/关系——用户是谁、我们在哪",
+        2: "偏好/情绪——用户喜欢什么，可直接复用",
+        3: "日常事实",
+    }
+    for it in pool:
+        it["recall_reason"] = _prio_label[_prio(it)]
+
+    # 四档分桶交织与批内按占比配额，确保每批四档均衡覆盖且不遗漏大基数日常档
+    _buckets = {0: [], 1: [], 2: [], 3: []}
+    for it in pool:
+        _buckets[_prio(it)].append(it)
+    for _k in _buckets:
+        _buckets[_k].sort(key=lambda x: -x.get("silent_days", 0.0))
+    _share = {_k: len(v) / max(1, len(pool)) for _k, v in _buckets.items()}
+    _rotor = []
+    _idx = {_k: 0 for _k in _buckets}
+    _total = sum(len(v) for v in _buckets.values())
+    while len(_rotor) < _total:
+        for _k in (0, 1, 2, 3):
+            if _idx[_k] < len(_buckets[_k]):
+                _rotor.append(_buckets[_k][_idx[_k]])
+                _idx[_k] += 1
+    pool = _rotor
+
+    _pool_size = len(pool)
+    # 自动游标轮批：未显式传 cursor 时从 .evolve_cursor.json 读取并自动推进，遍历完一轮后归零
+    _cursor_path = os.path.join(refs_dir, ".evolve_cursor.json")
+    _auto_cursor = cursor is None
+    if _auto_cursor:
+        try:
+            cursor = int(json.loads(open(_cursor_path, encoding="utf-8").read()).get("cursor", 0))
+        except Exception:
+            cursor = 0
+    cursor = max(0, int(cursor or 0))
+    if cursor > max(0, len(pool) - 1):
+        cursor = 0
+    _batch = pool[cursor:cursor + limit]
+    # 批内按四档占比分配名额，余数按占比从高到低依次补齐至 limit
+    _bb = {0: [], 1: [], 2: [], 3: []}
+    for it in _batch:
+        _bb[_prio(it)].append(it)
+    _quota = {}
+    for _k, _items in _bb.items():
+        _quota[_k] = min(len(_items), int(round(len(_batch) * _share[_k])))
+    _gap = len(_batch) - sum(_quota.values())
+    if _gap > 0:
+        for _k in sorted(_bb, key=lambda k: -_share[k]):
+            if _gap <= 0:
+                break
+            take = min(_gap, len(_bb[_k]) - _quota[_k])
+            if take > 0:
+                _quota[_k] += take
+                _gap -= take
+    _batch = []
+    for _k in (0, 1, 2, 3):
+        _batch.extend(_bb[_k][:_quota[_k]])
+    _next_cursor = cursor + len(_batch)
+    # 走完一圈：记住下一轮从 0 开始
+    if _next_cursor >= len(pool):
+        _next_cursor = 0
+    if _auto_cursor:
+        try:
+            with open(_cursor_path + ".tmp", "w", encoding="utf-8") as fh:
+                json.dump({"cursor": _next_cursor, "updated": ts_now()}, fh, ensure_ascii=False)
+            os.replace(_cursor_path + ".tmp", _cursor_path)
+        except Exception:
+            pass
+    pool = _batch
+
+    # === 守卫 === 超预算时从最旧的往最新涂内容，最后强制「凭已知道的下结论」。
+    budget = SELF_EVOLVE_CHAR_BUDGET
+    used = 0
+    compacted = False
+    for it in pool:
+        vlen = len(it.get("value") or "") + len(it.get("context") or "")
+        if used + vlen > budget:
+            it["value"] = "（已查过，内容已压缩——请基于此前已知信息下结论）"
+            it["context"] = None
+            compacted = True
+        else:
+            used += vlen
+
+    print(json.dumps({
+        "status": "evolve_ready",
+        "count": len(pool),
+        "pool_size": _pool_size,
+        "batch": {"cursor": cursor, "limit": limit, "next_cursor": _next_cursor,
+                  "round_done": _next_cursor == 0},
+        "focus": sorted(_focus) if _focus else [],
+        "days": days,
+        "char_budget": budget,
+        "chars_used": used,
+        "compacted": compacted,
+        "how_to_use": [
+            "这些是最近值得复盘的全量记忆（含当时的气氛+情绪标签+沉默天数），不是主题摘要。",
+            "★原料是全谱的★ 默认覆盖全库（days=365），让用户开心的事、惊喜、用户的偏好、",
+            "身份/里程碑、日常事实，和教训一样都是「我是谁、我该怎么对 TA」的素材——",
+            "人复盘不可能只想坏事。",
+            "★自动轮批★ 工具自己记游标：每次调用自动换下一批，走完一圈回到开头。",
+            "所以连续复盘时直接再调一次就行，不用你记批次；想回看某一批才手动传 cursor。",
+            "请回答三个问题：①我曾经在哪里做得不好（引记忆事实，不许编）；",
+            "②现在有没有更好，没有的话卡在哪；③未来具体怎么做，写成可执行的行为规则。",
+            "",
+            "★产物写哪里（定，不许写 trigger）★",
+            "结论必须写进 ~/.agent/memories/MEMORY.md 的「十、自我进化」分区，",
+            "由你自己推理后自己写——memory.md 是每轮都注入给 LLM 的文件，",
+            "trigger(memory.json) 必须主动搜才读得到，铁律不能靠「想起来去搜」。",
+            "写之前先读 MEMORY.md 现有内容，同主题的更新原条目而不是新起一条，",
+            "保持「■ 小标题（日期）：正文」的格式，日期用今天。",
+            "",
+            "★0 条是合法产出★ 但「没产出」和「偷懒」要能分开：写不出时",
+            "必须回一句「这批没新东西」+ 为什么（原料重复/无规律/证据不足），",
+            "然后停。说不出为什么的沉默 = 白跑一轮；说得出理由的 0 条 = 诚实复盘。",
+            "",
+            "★★★ 要精准，不要数量 ★★★",
+            "不是数量要上去，不是写越多越好，而是要写精准——",
+            "一条合格的进化结论必须同时满足：",
+            "  ① 是**规律/洞察/可执行规则**，不是对某条记忆的复述——",
+            "     从原料里照搬一条写进 MEMORY.md = 充数，是最坏的结果。",
+            "  ② 回答了这四个问题里的至少一个：这批记忆里有没有**规律**？",
+            "     有没有**值得写下来的**？对我们的**未来有没有帮助**？",
+            "     有没有**我现在没做、以后可以做得更好的**？",
+            "  ③ 能说出它是从哪几条原料里看出来的（证据），不是凭空感慨。",
+            "四个问题一个都答不上来 → 这批原料没新东西，老实说，然后停。",
+            "★宁愿只写 1 条精准的，也不写 5 条充数的——写不出就是 0 条，0 条同样合格。★",
+            "★写之前先读 MEMORY.md 现有内容——已经有的规律不要重复写，",
+            "  发现旧结论被新证据推翻，就更新原条目并注明依据。",
+            "",
+            "写 MEMORY.md 的铁律：禁带命令行原文和明文密钥，",
+            "密钥只写存放路径；运维细节优先宿主运维文档，MEMORY.md 只放高频铁律。",
+            "",
+            "★★★ 提交前必须过举证闸门 memory_evolve_check（程序会算，别想蒙）★★★",
+            "每条候选结论必须带齐：claim + source_ids(≥2条真实id) + key_diff(关键差异)",
+            " + trigger(触发条件) + behavior_change(行为改变) + falsifier(失效条件)"
+            " + existing_ref(存量对照：与哪条现有条目相关，或写「无同类」)。",
+            "闸门会判：整句/截断/短片段的原文搬运（连续≥12字一样就死）、与现有条目重复",
+            "（>0.75 须 update 不许 add）、三字段缺失（=装饰品）、假 id（=编坐标）。",
+            "verdict: pass=写正文 / weak=2条支撑标待加固 / watch=1条支撑只进待观察子区 / reject=不许写。",
+            "一次最多 2 条；写不出 0 条合法，硬凑不是。",
+            "把候选结论逐条交给 memory_evolve_check 校验，它逐条验：",
+            "① 举证：source_ids 必须 ≥2 条（单条只能进待观察区），且必须写出",
+            "   这几条之间的「关键差异」——照搬的结论写不出差异，会被拒；",
+            "② 反冗余：逐字重合度 ≥0.85 判为复述原文，整条作废；",
+            "③ 反重复：与 MEMORY.md「十、自我进化」现有条目 >0.75 相似 → 判重复，",
+            "   要求你改成 update 而不是 add；",
+            "④ 三字段：trigger / behavior_change / falsifier 三个填不满 → 判装饰品，拒收；",
+            "⑤ 每轮上限 2 条，写不出 0 条是合法的，硬凑不是。",
+        ],
+        "results": pool,
+    }, ensure_ascii=False, indent=2))
+
+
+# ---- 自我进化举证闸门 ----
+# 通过可计算判据校验候选进化结论（来源存在性、存量对照、反照搬双保险、反冗余、可证伪三字段、支撑度分级）。
+EVOLVE_MAX_PER_ROUND = 2        # 一次进化最多 2 条，写不出 0 条合法
+EVOLVE_MIN_SOURCES = 2          # 少于 2 条支撑 → 只能进待观察区
+EVOLVE_VERBATIM_THRESHOLD = 0.85   # 与单条原料逐字重合度超过它 → 判照搬，作废
+EVOLVE_DUP_THRESHOLD = 0.75     # 与自我进化区现有条目相似度超过它 → 判重复，须 update
+EVOLVE_WEAK_SOURCES = 2         # 恰好 2 条支撑 → 中，标记待加固
+
+
+def _short_ts(v):
+    """完整 ISO 时间戳 → 「MM-DD HH:mm」，砍掉秒/微秒/时区后缀。
+
+    Presentation 瘦身用：25 字符的时间戳里，
+    秒和时区对「这条多久没被提起」这个判断没有任何贡献。
+    """
+    v = str(v or "")
+    if len(v) >= 16:
+        return v[5:16].replace("T", " ")
+    return v or None
+
+
+def _bigrams(s):
+    """字符二元组集合（中文按字切，中英混排也适用）。"""
+    s = re.sub(r"\s+", "", str(s or ""))
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def cmd_evolve_check(refs_dir, entries, memory_md_path=None):
+    """举证闸门：校验候选进化结论，返回逐条 verdict。
+
+    entries: list[dict]，每条必须带：
+      claim        : 结论正文（要写进 MEMORY.md 的那句话）
+      source_ids   : list[str] 支撑这条结论的记忆 id（来自 memory_evolve 的原料）
+      key_diff     : str       这几条原料之间的「关键差异」——照搬写不出来
+      existing_ref : str       写之前先对照宿主记忆文件：说明与现有哪条相关（或明确写「无同类」）——
+                                相关时只许 update 原条目、不许 add，这一条直接掐死「换个说法再写一遍」。
+      trigger      : str       触发条件：当 ______ 出现时
+      behavior_change: str     行为改变：我不再 ______ / 我会先 ______
+      falsifier    : str       失效条件：如果 ______ 出现，说明这条是错的，应删除
+      action       : "add" | "update" | "watch"（默认 add；watch=只进待观察区）
+      target_line  : str       action=update 时，被更新的 MEMORY.md 条目原文/行号
+
+    判定（按顺序，先撞死哪条报哪条）：
+      reject  → 这条不许写，附 reason
+      watch  → 降级进待观察区（只有 1 条支撑时的唯一去向）
+      weak   → 可写但标「待加固」（恰好 2 条支撑）
+      pass   → 可写
+    """
+    if not isinstance(entries, list) or not entries:
+        print(json.dumps({"ok": False, "error": "entries 必须是非空 list"}, ensure_ascii=False))
+        return
+    if len(entries) > EVOLVE_MAX_PER_ROUND:
+        print(json.dumps({
+            "ok": False,
+            "error": f"一次进化最多 {EVOLVE_MAX_PER_ROUND} 条（用户定的硬上限）。收到 {len(entries)} 条。"
+                     f"写不出可以只交 0 条——0 条合法，硬凑不是。",
+        }, ensure_ascii=False))
+        return
+
+    mem_path = os.path.join(refs_dir, "memory.json")
+    memory = read_json_typed(mem_path, list, refs_dir, "memory")
+    by_id = {e.get("id"): e for e in memory if isinstance(e, dict) and e.get("id")}
+
+    # MEMORY.md 自我进化区现有条目（反重复用）
+    _md = memory_md_path or os.path.expanduser("~/.agent/memories/MEMORY.md")
+    _existing = []
+    try:
+        _lines = open(_md, encoding="utf-8").read().split("\n")
+        _in_sec = False
+        for ln in _lines:
+            if ln.startswith("十、自我进化"):
+                _in_sec = True
+                continue
+            if _in_sec and ln.startswith("━━"):
+                if _existing:
+                    break
+                continue
+            if _in_sec and ln.startswith("■"):
+                _existing.append(ln)
+    except Exception:
+        _md = None
+
+    verdicts = []
+    for i, ent in enumerate(entries):
+        if not isinstance(ent, dict):
+            verdicts.append({"index": i, "verdict": "reject", "reason": "条目不是对象"})
+            continue
+        claim = _safe_str(ent.get("claim") or "")
+        sids = ent.get("source_ids") or []
+        sids = [str(s) for s in sids if str(s)]
+        verdict, reason, notes = "pass", "", []
+
+        # ① 举证：≥2 条真实存在的来源 id
+        if not sids:
+            verdict, reason = "reject", "没给 source_ids——不举证不许写。规律陈述必须能指回哪几条记忆。"
+        elif len(sids) == 1:
+            verdict, reason = "watch", "只有 1 条支撑：不够格进正文，只能进「待观察」区，补足支撑再升级。"
+        elif len([s for s in sids if s in by_id]) < len(sids):
+            missing = [s for s in sids if s not in by_id]
+            verdict, reason = "reject", f"source_ids 里有 {len(missing)} 个 id 在记忆库不存在：{missing[:3]}——不许编造坐标。"
+
+        # ①bis 存量对照（v3.7）：「换个说法再写一遍」是自我进化最大的注水方式——
+        # 写之前必须先读宿主记忆文件的自我进化区：要么指出与哪条现有条目相关
+        # （相关 → 只许 update），要么明确声明「无同类」。这一条直接掐死重复新增。
+        if verdict != "reject":
+            _eref = _safe_str(ent.get("existing_ref") or "").strip()
+            if not _eref:
+                verdict, reason = "reject", ("没给 existing_ref——写之前必须先读宿主记忆文件的自我进化区做存量对照："
+                                             "要么写出「与第 K 条相关」，要么明确声明「无同类」。")
+            elif ("无同类" not in _eref) and ("none" not in _eref.lower()):
+                if str(ent.get("action") or "add").lower() != "update":
+                    verdict, reason = "reject", (f"existing_ref 已指明与现有条目相关（{_eref[:60]}）却用 add——"
+                                                 f"相关条目只许 update，不许新增。")
+
+        # ② 反照搬：两道判据，截断式搬运（抄前半句）也能被第二道抓住
+        if verdict != "reject":
+            worst, worst_id = 0.0, None
+            longest_run, run_id = 0, None
+            _claim_sq = re.sub(r"\s+", "", claim)
+            for sid in sids:
+                src = by_id.get(sid)
+                if not src:
+                    continue
+                sim = _jaccard(_bigrams(claim), _bigrams(src.get("value")))
+                if sim > worst:
+                    worst, worst_id = sim, sid
+                # 第二道：原文里最长的连续片段（≥12 字）是否原样出现在 claim 里。
+                # jaccard 会被「claim 比原文短」稀释——抄前半句 60% 只有 0.67，
+                # 但「原样搬运一段连续文字」这件事本身就该判死。
+                _src_sq = re.sub(r"\s+", "", str(src.get("value") or ""))
+                for _ln in (12, 16, 20, 30):
+                    if len(_src_sq) < _ln:
+                        continue
+                    for _st in range(0, min(len(_src_sq) - _ln + 1, 200)):
+                        if _src_sq[_st:_st + _ln] in _claim_sq:
+                            if _ln > longest_run:
+                                longest_run, run_id = _ln, sid
+                            break
+            notes.append(f"最高原文重合度 {worst:.2f}（vs {worst_id}）")
+            if longest_run >= 12:
+                notes.append(f"检出 {longest_run} 字连续原文搬运（vs {run_id}）")
+                verdict, reason = "reject", (f"与来源 {run_id} 有 {longest_run} 字连续原文一模一样——"
+                                             f"这是搬运不是提炼，即使整体重合度只有 {worst:.2f}。改成自己的话。")
+            elif worst >= EVOLVE_VERBATIM_THRESHOLD:
+                verdict, reason = "reject", (f"与来源 {worst_id} 重合度 {worst:.2f} ≥ {EVOLVE_VERBATIM_THRESHOLD}——"
+                                             f"这是照搬原文，不是提炼。改写或放弃。")
+            elif not _safe_str(ent.get("key_diff") or "").strip():
+                verdict, reason = "reject", ("没写 key_diff——必须说出这几条原料之间的关键差异。"
+                                             "照搬的结论写不出差异；找不出差别就说明你只是在搬运。")
+
+        # ③ 反冗余：与自我进化区现有条目比
+        if verdict not in ("reject",) and _existing:
+            best, best_ln = 0.0, None
+            for ln in _existing:
+                sim = _jaccard(_bigrams(claim), _bigrams(ln))
+                if sim > best:
+                    best, best_ln = sim, ln
+            if best >= EVOLVE_DUP_THRESHOLD:
+                action = str(ent.get("action") or "add").lower()
+                if action != "update":
+                    verdict, reason = "reject", (f"与自我进化区现有条目相似度 {best:.2f} ≥ {EVOLVE_DUP_THRESHOLD}——"
+                                                 f"memory.md 里已经在说这件事（「{best_ln[:60]}…」）。"
+                                                 f"禁止 add，只能 update 原条目（把 action 改成 update 并给 target_line）。")
+
+        # ④ 三字段：可证伪性
+        if verdict in ("pass", "weak"):
+            missing_fields = [k for k in ("trigger", "behavior_change", "falsifier")
+                              if not _safe_str(ent.get(k) or "").strip()]
+            if missing_fields:
+                verdict, reason = "reject", (f"缺字段 {missing_fields}——触发条件/行为改变/失效条件三个填不满，"
+                                             f"这条就是装饰品。连怎么被证伪都说不出的记忆是不可检验的废话。")
+
+        # ⑤ 支撑度分级
+        if verdict == "pass":
+            if len(sids) == EVOLVE_WEAK_SOURCES:
+                verdict, notes = "weak", notes + [f"恰好 {EVOLVE_WEAK_SOURCES} 条支撑：标「待加固」，下次复盘优先补证据。"]
+
+        verdicts.append({
+            "index": i, "verdict": verdict, "reason": reason,
+            "claim": claim[:120], "source_ids": sids, "notes": notes,
+        })
+
+    counts = {}
+    for v in verdicts:
+        counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
+    print(json.dumps({
+        "ok": True,
+        "verdicts": verdicts,
+        "summary": counts,
+        "memory_md": _md,
+        "next_steps": [
+            "pass → 写进 MEMORY.md「十、自我进化」正文区",
+            "weak → 写进正文，但标题带「待加固」",
+            "watch → 写进 MEMORY.md「十、自我进化」的待观察子区（WATCHLIST-START/END 之间）",
+            "reject → 不许写；按 reason 改写后重新提交，或承认这条推不出来",
+        ],
+    }, ensure_ascii=False, indent=2))
+
+
+# ---- 引用重写检测（悬空与过期引用扫描）----
+# 扫描宿主记忆文件（如 MEMORY.md）及可选的记忆库正文中引用的记忆坐标（mem_xxx / uuid），
+# 检测是否存在已删除/已归档（dangling）或已作废（stale，status=superseded/expired）的失效引用。
+def _memory_ids_in_text(text):
+    """从文本里抠出所有记忆坐标：mem_ 开头的 id + uuid 坐标。"""
+    out = set()
+    for m in re.finditer(r"mem_[A-Za-z0-9_]{6,}", str(text or "")):
+        out.add(m.group(0))
+    for m in re.finditer(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                         str(text or "")):
+        out.add(m.group(0))
+    return out
+
+
+def cmd_retraction_scan(refs_dir, memory_md_path=None, include_memory_text=False):
+    """扫描引用悬空：MEMORY.md（默认）里引用了已不存在/已作废记忆坐标的句子。
+
+    返回两类：
+      dangling  —— 引用的 id 在库里彻底不存在（被删/被 vacuum 归档）
+      stale     —— 引用的 id 还在，但已 superseded（内容被更新过，旧引用可能说旧版）
+
+    每条附 citing_line（引用它的原文），方便直接定位改写。
+    include_memory_text=True 时连 memory.json 内部互相引用也扫（更全但更慢）。
+    """
+    mem_path = os.path.join(refs_dir, "memory.json")
+    memory = read_json_typed(mem_path, list, refs_dir, "memory")
+    live = {}
+    for e in memory:
+        if isinstance(e, dict) and e.get("id"):
+            live[e["id"]] = e
+    _md = memory_md_path or os.path.expanduser("~/.agent/memories/MEMORY.md")
+
+    def _classify(cid):
+        ent = live.get(cid)
+        if ent is None:
+            return "dangling", None
+        if ent.get("status") == "superseded":
+            return "stale", ent
+        if ent.get("status") == "expired":
+            return "stale", ent
+        return "live", ent
+
+    findings = []
+    md_readable = True
+    try:
+        md_lines = open(_md, encoding="utf-8").read().split("\n")
+    except Exception:
+        md_lines = []
+        md_readable = False
+    for ln_no, ln in enumerate(md_lines, 1):
+        if not ln.strip():
+            continue
+        for cid in _memory_ids_in_text(ln):
+            kind, ent = _classify(cid)
+            if kind == "live":
+                continue
+            findings.append({
+                "where": "MEMORY.md",
+                "line": ln_no,
+                "citing": ln.strip()[:160],
+                "ref_id": cid,
+                "kind": kind,
+                "current_value": (str(ent.get("value"))[:100] if ent else None),
+                "current_status": (ent.get("status") if ent else "gone"),
+            })
+
+    # 可选：memory.json 内部互相引用
+    if include_memory_text:
+        for e in memory:
+            if not isinstance(e, dict):
+                continue
+            for cid in _memory_ids_in_text(e.get("value")):
+                if cid == e.get("id"):
+                    continue
+                kind, ent = _classify(cid)
+                if kind == "live":
+                    continue
+                findings.append({
+                    "where": "memory.json",
+                    "line": None,
+                    "citing": f"{e.get('id')} → {str(e.get('value'))[:100]}",
+                    "ref_id": cid,
+                    "kind": kind,
+                    "current_value": (str(ent.get("value"))[:100] if ent else None),
+                    "current_status": (ent.get("status") if ent else "gone"),
+                })
+
+    _d = [f for f in findings if f["kind"] == "dangling"]
+    _s = [f for f in findings if f["kind"] == "stale"]
+    print(json.dumps({
+        "ok": True,
+        "memory_md": _md,
+        "memory_md_readable": md_readable,
+        "scanned": {"memory_md_lines": len(md_lines),
+                    "memory_entries": len(memory) if include_memory_text else None},
+        "dangling_count": len(_d),
+        "stale_count": len(_s),
+        "dangling": _d[:50],
+        "stale": _s[:50],
+        "what_to_do": [
+            "dangling：MEMORY.md 这句话引用了一个已经不存在的记忆——删掉这句引用，",
+            "或改成现在仍然成立的说法（先 memory_search 确认现在的事实是什么）。",
+            "stale：引用的记忆还在但已被 superseded（内容更新过）——这句话可能在说旧版，",
+            "读一眼 current_value，是旧版就改写，仍然成立就留着。",
+            "★为什么重要★ MEMORY.md 每轮都注入。一个没有支撑的引用 = 每轮都在重复一个",
+            "已经没有依据的事实。删除不产生信号，所以只有扫才发现得了。",
+        ],
+    }, ensure_ascii=False, indent=2))
 
 # ---- 承诺追踪（promises.json）----
 def _promises_path(refs_dir):
@@ -1621,10 +2249,7 @@ def _write_promises(refs_dir, data):
 
 
 def cmd_promise(text, refs_dir, deadline=None):
-    """=== PATCH v2.9 (承诺建档) === AI 亲口答应的事，建档必追。
-
-    只要 AI 对用户做了承诺（明天写歌 / 纪念日准备惊喜 / 帮你查某件事），立即建档。
-    deadline 可选（YYYY-MM-DD 或 ISO），到期未完成会被 cmd_promise_check 主动戳。"""
+    """承诺建档：将 Agent 对用户的承诺写入 promises.json（可选附带 deadline 供闹钟与逾期检查使用）。"""
     text = _safe_str(text).strip()
     if not text:
         raise ValueError("承诺内容不能为空")
@@ -1643,7 +2268,7 @@ def cmd_promise(text, refs_dir, deadline=None):
 
 
 def cmd_promise_done(promise_id, refs_dir):
-    """=== PATCH v2.9 (承诺完成) === 完成一项划掉一项：open → done + completed_at。"""
+    """承诺完成：将指定 promise_id 的状态从 open 更新为 done 并记录 completed_at。"""
     data = _read_promises(refs_dir)
     found = None
     for p in data["promises"]:
@@ -1662,7 +2287,7 @@ def cmd_promise_done(promise_id, refs_dir):
 
 
 def cmd_promise_list(refs_dir):
-    """=== PATCH v2.9 (承诺清单) === 列出全部承诺：open 在前（含是否逾期）、done 在后。"""
+    """承诺清单：列出全部承诺，未完成（open，标注是否逾期）排前，最近已完成（done）排后。"""
     data = _read_promises(refs_dir)
     now = datetime.now(TZ)
     open_items = []
@@ -1694,15 +2319,12 @@ def cmd_promise_list(refs_dir):
         "open_count": len(open_items),
         "done_count": len(done_items),
         "open": open_items,
-        "done": done_items[-20:],  # 只回最近完成的，别撑爆输出
+        "done": done_items[-20:],
     }, ensure_ascii=False, indent=2))
 
 
 def cmd_promise_check(refs_dir):
-    """=== PATCH v2.9 (承诺主动戳) === 未完成的承诺要经常主动触发提醒 AI：当时答应了还没做。
-
-    返回全部未完成承诺，逾期（deadline 已过）与"已过了好几天还没动静"的排最前——
-    供 AI 在每次会话开始时自查、或由定时任务主动推送，别让承诺默默消失。"""
+    """未完成承诺检查：返回全部 open 状态的承诺，按已逾期、临期、创建时长排序。"""
     data = _read_promises(refs_dir)
     now = datetime.now(TZ)
     pending = []
@@ -1757,8 +2379,8 @@ def cmd_promise_check(refs_dir):
 # 三种触发：① MCP server 内置后台线程（mcp_server.py 常驻时自动跑）
 #           ② CLI `promise watch` 常驻子命令（零依赖，nohup 挂后台）
 #           ③ 会话内注入：任何工具/命令返回时附上临期/逾期承诺（memory_promise_check 与
-#              各 cmd_* 会自动附加 promise_reminders 字段），宿主每次唤醒 AI 都能撞见。
-# 推送渠道：Bark（BARK_KEY 环境变量或 refs 目录 .bark_key 文件）/ 自定义 webhook
+#              各 cmd_* 会自动附加 promise_reminders 字段），宿主每次唤醒 Agent 都能撞见。
+# 推送渠道：Bark（BARK_KEY / MEMORY_TRIGGER_BARK_KEY 环境变量）/ 自定义 webhook
 #           （MEMORY_TRIGGER_WEBHOOK_URL 环境变量）/ 落盘 .promise_reminders.md（默认，保证无网络也能留痕）。
 PROMISE_REMIND_DAYS = 1              # 临期窗口：deadline 距今天 ≤ 该天数视为"临期"，与到期记忆 EXPIRY_REMIND_DAYS 对齐
 PROMISE_WATCH_INTERVAL = 300         # 后台线程/常驻 watch 的默认检查间隔（秒）
@@ -1799,8 +2421,7 @@ def _promise_due_items(refs_dir):
             d = ts_parse(deadline)
         except (ValueError, TypeError):
             continue
-        # 逾期：deadline < now —— 不管逾期多久都要一直提醒（破洞修复：旧逻辑逾期超 REMIND_DAYS 天就被丢弃）。
-        # 临期：今天 ≤ deadline 且距今天 ≤ PROMISE_REMIND_DAYS 天（加回上界，未来还远的不再误标临期）。
+        # 筛选已逾期（deadline < now）或处于临期窗口内（距今天 ≤ PROMISE_REMIND_DAYS 天）的未完成承诺
         overdue = d < now
         due_soon = (not overdue) and ((d - today0).days <= PROMISE_REMIND_DAYS)
         if not (overdue or due_soon):
@@ -1818,7 +2439,7 @@ def _promise_due_items(refs_dir):
 
 
 def _send_bark(title, body):
-    """Bark 原生推送：key 取环境变量 BARK_KEY，其次 refs_dir/.bark_key（在调用方补）。返回 bool。"""
+    """Bark 原生推送：key 只取环境变量 BARK_KEY / MEMORY_TRIGGER_BARK_KEY。返回 bool。"""
     key = os.environ.get("BARK_KEY") or os.environ.get("MEMORY_TRIGGER_BARK_KEY")
     if not key:
         return False
@@ -1831,8 +2452,7 @@ def _send_bark(title, body):
             with urlopen(req, timeout=10) as resp:
                 resp.read()
         except Exception as ssl_err:
-            # 部分环境（系统 python 缺 CA 证书）SSL 校验失败；个人通知场景降级为不校验，
-            # 让 Bark 能送出去——失败仍有落盘文件兜底，不静默吞掉推送能力。
+            # 系统 Python 缺少 CA 证书导致 SSL 校验失败时，降级使用未校验上下文发送通知（仍有本地文件落盘兜底）。
             ctx = _unverified_ssl_context()
             if ctx is None:
                 raise ssl_err
@@ -1950,32 +2570,27 @@ def cmd_promise_watch(refs_dir, interval=None):
 
 def _promise_reminders_field(refs_dir):
     """会话内注入用：返回 {promise_reminders: [...]}，有临期/逾期承诺时附加到工具输出。
-    不推送、不标记已通知——只让 AI/宿主每次唤醒都看得见。"""
+    不推送、不标记已通知——只让 Agent/宿主每次唤醒都看得见。"""
     items = _promise_due_items(refs_dir)
     if not items:
         return {}
     return {"promise_reminders": items}
 
 
-# === PATCH v3.2 (维护提示注入) === 痛点：decay/vacuum/backup/selfcheck/expire_check/stats
-# 在对话流里没有天然触发点——AI 永远「想不起来」调它们（90 天实测全 0 次，唯一一次
-# 是用户戳了才跑）。promise_reminders 证明了「会话内注入」是对这个脑子的物理约束：
-# 提示词是愿望，注入才是机制。这里给维护工具接同款：距上次维护超 7 天，
-# 每次 memory_write / memory_search 的返回值都带 maintenance_due 字段，
-# AI 撞见就主动跑一遍维护五件套，不靠自觉、不靠周日 cron 兜底。
+# 会话内维护到期提示注入：当距上次全套维护（.last_maintenance 的 mtime）超过 7 天时，
+# 在工具返回中附加 maintenance_due 字段，引导 Agent 主动执行维护五件套并调用 memory_touch_maintenance 登记。
 _MAINT_DUE_FILE = ".last_maintenance"
 _MAINT_INTERVAL_DAYS = 7
 
 
 def _maintenance_due_field(refs_dir):
-    """会话内注入用：距上次全套维护超过 7 天时返回 {maintenance_due: {...}}。
-    写入/检索命中即撞见——AI 看见该字段应立即调 decay→vacuum→stats→selfcheck→expire_check。"""
+    """会话内注入用：距上次全套维护超过 7 天时返回 {maintenance_due: {...}}。"""
     try:
         marker = os.path.join(refs_dir, _MAINT_DUE_FILE)
         if os.path.exists(marker):
             age_days = (time.time() - os.path.getmtime(marker)) / 86400.0
         else:
-            age_days = float("inf")  # 从未维护过——立即提示
+            age_days = float("inf")
         if age_days < _MAINT_INTERVAL_DAYS:
             return {}
         return {
@@ -1994,8 +2609,7 @@ def _maintenance_due_field(refs_dir):
 
 
 def cmd_touch_maintenance(refs_dir):
-    """登记「刚刚跑完全套维护」——maintenance_due 注入以文件 mtime 为唯一真相源，
-    调本工具即刷新。维护五件套跑完必须调它，否则每次工具返回都会重复撞见提示。"""
+    """刷新 .last_maintenance 时间戳，登记已完成全套周期维护。"""
     marker = os.path.join(refs_dir, _MAINT_DUE_FILE)
     try:
         with open(marker, "w", encoding="utf-8") as fh:
@@ -2006,12 +2620,7 @@ def cmd_touch_maintenance(refs_dir):
 
 
 def _unsuppress_entity(refs_dir, entity):
-    """=== PATCH v2.8.3 (3.4b) === 把某实体从"已遗忘清单"里摘掉并重生成 prompt。
-
-    用户重新写入一条记忆，就意味着这件事又该被记住了。若不同步清理 suppressed，
-    记忆库会进入自相矛盾的状态：memory_search 能召回它，suppressed_prompt.md
-    却仍在指示 AI「不要主动提及」——AI 于是"知道却装作不知道"。
-    """
+    """当某实体被重新写入时，将其从 .suppressed.json 中移除并重新生成 suppressed_prompt.md。"""
     supp_path = os.path.join(refs_dir, ".suppressed.json")
     if not os.path.exists(supp_path):
         return
@@ -2034,7 +2643,7 @@ def _regen_suppressed_prompt(refs_dir, supp):
     """根据 .suppressed.json 重新生成 suppressed_prompt.md"""
     lines = ["# 已遗忘清单（双向遗忘）",
              "",
-             "以下记忆已从文件标 superseded，且你（agent）自身也应放下，**不要主动提及**：",
+             "以下记忆已从文件标 superseded，且你（Agent）自身也应放下，**不要主动提及**：",
              ""]
     for s in supp.get("suppressed", []):
         if not isinstance(s, dict):
@@ -2052,15 +2661,15 @@ def _regen_suppressed_prompt(refs_dir, supp):
 def cmd_init(mode, refs_dir):
     # mode 校验放在 cmd_init 本身而非只放 CLI main()：MCP memory_init 也走本函数，
     # 否则 MCP 传 mode="hack" 会照样写进 backend_config.json（CLI 与 MCP 行为不一致）。
-    if mode not in ("local", "graph"):
-        raise ValueError(f"未知 mode: {mode!r}（仅支持 local / graph）")
+    if mode != "local":
+        raise ValueError(f"未知 mode: {mode!r}（仅支持 local）")
     os.makedirs(refs_dir, exist_ok=True)
     os.makedirs(os.path.join(refs_dir, ".backup"), exist_ok=True)
     os.makedirs(os.path.join(refs_dir, ".archive"), exist_ok=True)
 
     backend_path = os.path.join(refs_dir, "backend_config.json")
     if not os.path.exists(backend_path):
-        backend_info = "纯本地文件模式" if mode == "local" else "本地文件 + graph 镜像"
+        backend_info = "纯本地文件模式"
         safe_write_json(backend_path, {
             "mode": mode,
             "backend_info": backend_info
@@ -2098,7 +2707,7 @@ def cmd_init(mode, refs_dir):
         with open(prom_path, "w", encoding="utf-8") as f:
             f.write("# 承诺追踪\n\n")
 
-    # === PATCH v2.9 === 承诺数据文件（promises.md 保留为人类可读入口，真数据落 json）
+    # 承诺账本数据文件（promises.md 保留为人类可读入口，结构化数据落盘 promises.json）
     proj_path = os.path.join(refs_dir, "promises.json")
     if not os.path.exists(proj_path):
         safe_write_json(proj_path, {"promises": []})
@@ -2111,7 +2720,7 @@ def cmd_init(mode, refs_dir):
 
 
 def cmd_recover(refs_dir):
-    """从 WAL 恢复崩溃时未完成持久化的写入。去重键 (entity, memory_id)。"""
+    """从 WAL（.wal.jsonl）重放崩溃时未提交的写入，按 (entity, memory_id) 幂等去重并在完成后截断 WAL。"""
     wal_path = os.path.join(refs_dir, ".wal.jsonl")
     if not os.path.exists(wal_path):
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "no_wal_file"}))
@@ -2121,15 +2730,11 @@ def cmd_recover(refs_dir):
         lines = [l.strip() for l in f if l.strip()]
 
     if not lines:
-        # === 修复 (finding #3) === 即便 WAL 文件存在但无内容，也清空它，
-        # 避免残留空行不断累积。
         _wal_prune(refs_dir, keep=[])
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "empty_wal"}))
         return
 
-    # === PATCH v2.8.3 (3.3d) === 逐行解析并跳过损坏行。此前用列表推导整体
-    # json.loads，WAL 里只要混进一行断电写坏的内容，整个 recover 就抛
-    # JSONDecodeError 退出——恰恰在最需要恢复的崩溃场景下彻底失效。
+    # 逐行解析并跳过格式损坏的记录行
     entries = []
     bad_lines = 0
     for ln in lines:
@@ -2150,9 +2755,7 @@ def cmd_recover(refs_dir):
         if e.get("op") == "commit":
             committed.add((e.get("entity"), e.get("memory_id")))
 
-    # === PATCH v2.8.3 (P0-1) === 已落盘的 memory_id 也算已完成。
-    # 双保险：即便历史 WAL 里残留了旧版本产生的孤儿 upsert，只要对应记录
-    # 已在 memory.json 中存在，就不再重放，避免无限自我复制。
+    # 已存在于 memory.json 的 memory_id 视为已完成持久化，不重复重放
     existing_ids = {m.get("id") for m in read_json_typed(os.path.join(refs_dir, "memory.json"), list)
                     if isinstance(m, dict)}
 
@@ -2168,18 +2771,9 @@ def cmd_recover(refs_dir):
 
     uncommitted = list(uncommitted_map.values())
     if not uncommitted:
-        # === 修复 (finding #3) === 关键：正常路径下每次 cmd_write 都会向 WAL 追加
-        # 一对 upsert+commit，但内存已落盘、WAL 永不自动清。recover 跑起来发现"全部已
-        # 提交"就直接返回，等于放任 WAL 无限膨胀（实测每跑一次 1→3→5→7…）。这里必须
-        # 把 WAL 整体清空——它们都已安全持久化，没有保留价值。
         _wal_prune(refs_dir, keep=[])
         print(json.dumps({"status": "ok", "recovered": 0, "reason": "all_committed"}))
         return
-
-    # === PATCH v2.8.3 (P0-5) === 绝不 unlink .lock。
-    # flock 的互斥建立在 inode 上：删掉锁文件后，正持有锁的进程仍以为自己独占，
-    # 而新进程 open 出的是全新 inode 也能立刻拿到锁 —— 两边同时写，互斥形同虚设。
-    # 真正的死锁场景已由 file_lock 内的「持有者进程不存在 → truncate 复用同 inode」处理。
 
     recovered = []
     failed = []
@@ -2201,16 +2795,15 @@ def cmd_recover(refs_dir):
                 emotion_tags=e.get("emotion_tags"),
                 core=e.get("core"),
                 reason=e.get("reason"),
-                context=e.get("context"),           # === PATCH v2.9 ===
-                expires_at=e.get("expires_at"),     # === PATCH v2.9 ===
+                context=e.get("context"),
+                expires_at=e.get("expires_at"),
             )
             recovered.append(ent_name)
         except Exception as ex:
             sys.stderr.write(f"[memory_recover] recover failed for {ent_name!r}: {ex}\n")
             failed.append(e)
 
-    # === 修复 (finding #3) === 重放完成后截断 WAL：只保留重放失败的行，
-    # 已成功落盘的记录一律清除，避免 WAL 文件无限增长（1→3→5→7…）。
+    # 重放完成后截断 WAL，仅保留重放失败的记录
     _wal_prune(refs_dir, keep=failed)
 
     print(json.dumps({
@@ -2223,19 +2816,14 @@ def cmd_recover(refs_dir):
 
 
 def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
-    today = datetime.now(TZ).date().isoformat()   # === PATCH v2.6 A2 === 统一用 TZ
+    today = datetime.now(TZ).date().isoformat()
     well_path = os.path.join(refs_dir, "wellness.json")
     entry = {
         "date": today,
         "mood": _safe_str(mood),
-        "recorded_at": ts_now(),   # === PATCH v2.6 A2 === 改用 ts_now()，全库统一 UTC+8
+        "recorded_at": ts_now(),
     }
-    # === PATCH v2.8.3 (P0-4) === sleep_hours 分三档处理：
-    #   ① 空 / "-"          → 不记该字段
-    #   ② 完全无法解析成数字（"abc"/"八小时"）→ 温和忽略并告警，不打断心情记录
-    #   ③ 能解析但值非法（NaN/Inf/1e400/负数/>24）→ 明确拒绝。
-    #      NaN、Inf 若落盘会让 wellness.json 出现裸 NaN 字面量，非 Python 客户端
-    #      从此无法解析整个文件；负数/超 24 小时则是明显的脏数据。
+    # sleep_hours 校验：空值或 "-" 略过；非数字字符串告警略过；数值则校验 [0, 24] 有限区间
     if sleep_hours not in (None, "", "-"):
         raw = sleep_hours.strip() if isinstance(sleep_hours, str) else sleep_hours
         try:
@@ -2251,59 +2839,20 @@ def cmd_wellness(mood, sleep_hours, sleep_quality, note, refs_dir):
     if note and note != "-":
         entry["note"] = _safe_str(note)
 
-    # === 修复 (finding #8) === 整个 read-modify-write 必须在同一把文件锁内完成。
-    # 此前只给 safe_write_json 加锁，但读盘（read_json_typed）在锁外——并发写心情时
-    # 多个线程读到同一份旧快照、各自 append 一条再写回，后写的覆盖先写的，记录就丢
-    # （实测 20 并发只剩 2 条）。现在读+改+写全在锁内，串行化保证不丢。
+    # 在同一文件锁内完成读取、追加、截断与写回，保证并发安全
     fd = file_lock(refs_dir)
     try:
-        # === PATCH v2.8.3 (3.3c) === 改走 read_json_typed。此前直接 json.load，
-        # wellness.json 一旦损坏就抛 JSONDecodeError，连"记一下今天心情"都做不了。
         data = read_json_typed(well_path, dict, refs_dir, "wellness")
         if not isinstance(data.get("records"), list):
             data["records"] = []
         data["records"].append(entry)
-        # === v2.8.4 === 记录上限：只保留最近 WELLNESS_MAX_RECORDS 条，防止天长日久无界增长。
-        # 按 date 升序截断（写入顺序本就近似有序，直接取尾部最稳）。新写入必被保留。
+        # 保留最近 WELLNESS_MAX_RECORDS 条记录
         if len(data["records"]) > WELLNESS_MAX_RECORDS:
             data["records"] = data["records"][-WELLNESS_MAX_RECORDS:]
         safe_write_json(well_path, data)
     finally:
         file_unlock(fd, refs_dir)
     print(json.dumps({"status": "ok", "date": today, "mood": mood}, ensure_ascii=False))
-
-
-def _maybe_mirror_to_graph(entry, refs_dir):
-    """v2.8 拆耦合: graph 镜像逻辑已迁至 references/graph_backend.py（自包含, 仅该模块 import sqlite3）。
-
-    本函数保证: 默认本地模式下**完全不接触 sqlite3 / graph_backend**——仅当
-    backend_config.json 设 mirror_mode=='graph' 且 graph_db_path 存在时, 才动态
-    加载 graph_backend 并调用其 mirror_to_graph()。这样核心文件顶部不再有 sqlite3
-    硬依赖, '零依赖' 名副其实, graph 成真·可选后端。"""
-    # 轻量预筛: 只读 config 判断, 不加载任何 sqlite 相关模块
-    try:
-        cfg_path = os.path.join(refs_dir, "backend_config.json")
-        if not os.path.exists(cfg_path):
-            return
-        with open(cfg_path, "r", encoding="utf-8") as _f:
-            cfg = json.load(_f) or {}
-        if cfg.get("mirror_mode") != "graph":
-            return
-        gdb = cfg.get("graph_db_path")
-        if not gdb or not os.path.exists(gdb):
-            return
-    except Exception:
-        return
-    # 到此才动态加载 graph 后端（此时才 import sqlite3）
-    try:
-        import importlib.util as _ilu
-        _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "graph_backend.py")
-        _spec = _ilu.spec_from_file_location("graph_backend", _path)
-        _mod = _ilu.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        _mod.mirror_to_graph(entry, refs_dir, cfg=cfg)
-    except Exception as e:
-        sys.stderr.write(f"[mirror_to_graph] skipped: {e}\n")
 
 
 def main():
@@ -2315,8 +2864,7 @@ def main():
     refs_dir = os.path.dirname(os.path.abspath(__file__))
 
     args = list(sys.argv[2:])
-    # 取最后一个“是目录”的参数作为 refs_dir，兼容把 --flag 写在路径之后的写法，
-    # 例如 `write X Y Z references/ --core true`（此前仅识别 args[-1]，会导致路径漏识别）。
+    # 从后往前查找最后一个已存在的目录参数作为 refs_dir，兼容在路径后追加 --flag 的调用顺序
     _ref_idx = None
     for _i in range(len(args) - 1, -1, -1):
         if os.path.isdir(args[_i]):
@@ -2330,7 +2878,7 @@ def main():
             mode = None
             sentiment = None
             source = "auto_detect"
-            confidence = 1.0
+            confidence = None  # 必填参数，由 cmd_write 校验
             emotion_tags = None
             reason = None
             core = None
@@ -2426,12 +2974,14 @@ def main():
         elif cmd == "recall":
             limit = 3
             recent_hours = None
+            tags = None
+            tag_mode = "any"
             nm_args = []
             i = 0
             while i < len(args):
                 if args[i] == "--limit" and i + 1 < len(args):
                     try:
-                        limit = max(1, min(10, int(args[i + 1])))
+                        limit = max(1, min(20, int(args[i + 1])))
                     except ValueError:
                         pass
                     i += 2
@@ -2441,9 +2991,70 @@ def main():
                     except ValueError:
                         pass
                     i += 2
+                elif args[i] == "--tags" and i + 1 < len(args):
+                    tags = [t.strip() for t in args[i + 1].split(",") if t.strip()] or None
+                    i += 2
+                elif args[i] == "--tag-mode" and i + 1 < len(args):
+                    tag_mode = args[i + 1] if args[i + 1] in ("any", "all") else "any"
+                    i += 2
                 else:
                     nm_args.append(args[i]); i += 1
-            cmd_recall(refs_dir, limit, recent_hours)
+            cmd_recall(refs_dir, limit, recent_hours, tags=tags, tag_mode=tag_mode)
+        elif cmd == "evolve":
+            # 自我进化：按游标自动轮批提取复盘原料
+            limit = SELF_EVOLVE_DEFAULT_LIMIT
+            days = SELF_EVOLVE_DEFAULT_DAYS
+            focus = None
+            cursor = None
+            i = 0
+            while i < len(args):
+                if args[i] == "--limit" and i + 1 < len(args):
+                    try:
+                        limit = max(1, min(SELF_EVOLVE_MAX_LIMIT, int(args[i + 1])))
+                    except ValueError:
+                        pass
+                    i += 2
+                elif args[i] == "--days" and i + 1 < len(args):
+                    try:
+                        days = max(0, int(args[i + 1]))
+                    except ValueError:
+                        pass
+                    i += 2
+                elif args[i] == "--focus" and i + 1 < len(args):
+                    focus = [t.strip() for t in args[i + 1].split(",") if t.strip()] or None
+                    i += 2
+                elif args[i] == "--cursor" and i + 1 < len(args):
+                    try:
+                        cursor = max(0, int(args[i + 1]))
+                    except ValueError:
+                        pass
+                    i += 2
+                else:
+                    i += 1
+            cmd_self_evolve(refs_dir, limit=limit, days=days, focus=focus, cursor=cursor)
+        elif cmd == "retraction-scan":
+            # 引用悬空扫描：检测宿主记忆文件或记忆库内的失效引用
+            _mdp = None
+            _inc = False
+            i = 0
+            while i < len(args):
+                if args[i] == "--memory-md" and i + 1 < len(args):
+                    _mdp = args[i + 1]; i += 2
+                elif args[i] == "--include-memory-text":
+                    _inc = True; i += 1
+                else:
+                    i += 1
+            cmd_retraction_scan(refs_dir, memory_md_path=_mdp, include_memory_text=_inc)
+        elif cmd == "evolve-check":
+            # 举证闸门：从 stdin 读取候选结论 JSON 数组并逐条校验
+            try:
+                _payload = json.loads(sys.stdin.read() or "[]")
+            except Exception as e:
+                print(json.dumps({"ok": False, "error": f"stdin 不是合法 JSON: {e}"}), file=sys.stderr)
+                sys.exit(1)
+            _entries = _payload.get("entries") if isinstance(_payload, dict) else _payload
+            _mdp = _payload.get("memory_md_path") if isinstance(_payload, dict) else None
+            cmd_evolve_check(refs_dir, _entries or [], memory_md_path=_mdp)
         elif cmd == "promise":
             if not args:
                 print(json.dumps({"error": "用法: promise <add|done|list|check> ..."}), file=sys.stderr)
@@ -2493,13 +3104,11 @@ def main():
                 print(json.dumps({"error": "用法: init <mode> [refs_dir]  mode: local"}), file=sys.stderr)
                 sys.exit(1)
             mode = args[0]
-            # === 修复 (finding #4) === 路径显式取自第二个参数：上面的 isdir 回扫只识别
-            # "已存在"的目录，而 init 的目标路径往往尚不存在（需要先建库）。若路径已存在，
-            # 回扫已把它从 args 弹出并设好 refs_dir；若还不存在，这里用 args[1] 兜底。
+            # 若目标目录尚不存在（未被上方 isdir 预扫描弹出），则从 args[1] 读取目标路径
             if len(args) > 1:
                 refs_dir = os.path.abspath(args[1])
-            if mode not in ("local", "graph"):
-                print(json.dumps({"error": f"未知 mode: {mode!r}（仅支持 local / graph）"}), file=sys.stderr)
+            if mode != "local":
+                print(json.dumps({"error": f"未知 mode: {mode!r}（仅支持 local）"}), file=sys.stderr)
                 sys.exit(1)
             cmd_init(mode, refs_dir)
         else:

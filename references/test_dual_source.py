@@ -54,7 +54,7 @@ def test_recall_and_source_and_emotion():
     run(WP, "init", "local", d)
 
     # T1: 写入偏好 + 检索 → last_recalled 被戳
-    run(WP, "write", "读书", "preference", "用户的晚间习惯", d)
+    run(WP, "write", "读书", "preference", "用户的晚间习惯", d, "--confidence", "0.95")
     run(WP, "search", "读书", d)
     mem = load(os.path.join(d, "memory.json"))
     e = mem[0]
@@ -79,7 +79,7 @@ def test_recall_and_source_and_emotion():
 
     # T4: relationship + emotion_tags 情感维度
     run(WP, "write", "友商", "relationship", "用户提友商我会留意",
-        "--sentiment", "neg", "--emotion-tags", "占有,吃醋,在意", refs=d)
+        "--sentiment", "neg", "--emotion-tags", "占有,吃醋,在意", "--confidence", "0.95", refs=d)
     out = json.loads(run(WP, "search", "友商", d))
     ent = out["results"][0]
     check("T4 emotion_tags 落库", ent.get("emotion_tags") == ["占有", "吃醋", "在意"],
@@ -90,21 +90,21 @@ def test_recall_and_source_and_emotion():
 
     # T5: 非法 kind 被拒（防字段错位）
     try:
-        run(WP, "write", "测试", "用户喜欢的备注", "乱写", d)
+        run(WP, "write", "测试", "用户喜欢的备注", "乱写", d, "--confidence", "0.95")
         check("T5 非法 kind 被拒", False, "未抛错")
     except RuntimeError:
         check("T5 非法 kind 被拒", True)
 
     # T6: 双向遗忘 forget
-    run(WP, "write", "事故", "event", "读书里吃到事故", d)
-    run(WP, "forget", "事故", "--reason", "用户不想再提", refs=d)
+    run(WP, "write", "剧透", "event", "读书时遇到剧透", d, "--confidence", "0.95")
+    run(WP, "forget", "剧透", "--reason", "用户不想再提", refs=d)
     mem = load(os.path.join(d, "memory.json"))
-    worm = [m for m in mem if m["entity"] == "事故"][0]
+    worm = [m for m in mem if m["entity"] == "剧透"][0]
     check("T6 forget → superseded", worm["status"] == "superseded")
     check("T6 .suppressed.json 生成", os.path.exists(os.path.join(d, ".suppressed.json")))
     sp = os.path.join(d, "suppressed_prompt.md")
     check("T6 suppressed_prompt.md 生成且含实体",
-          os.path.exists(sp) and "事故" in open(sp, encoding="utf-8").read())
+          os.path.exists(sp) and "剧透" in open(sp, encoding="utf-8").read())
 
     # T7: stats 含 pending 计数与最久未召回
     out = json.loads(run(WP, "stats", d))
@@ -124,8 +124,8 @@ def test_merge():
     file_mem = [
         {"id": "f1", "entity": "任务乙", "kind": "preference",
          "value": "用户最关注的指标", "status": "active", "source": "file_import",
-         "created": "2026-07-09T10:00:00+08:00", "updated": "2026-07-09T10:00:00+08:00"},
-        # 损坏样本（模拟 示例式字段错位）
+         "created": "2030-01-01T10:00:00+08:00", "updated": "2030-01-01T10:00:00+08:00"},
+        # 损坏样本（模拟字段错位）
         {"id": "f2", "entity": "任务甲", "kind": "用户可能关注的指标",
          "value": "event", "status": "active", "source": "file_import"},
     ]
@@ -182,12 +182,12 @@ def test_core_and_decay():
     run(WP, "init", "local", d)
 
     # 关系类型默认 core=True（"我们是谁"的基石，永不衰减）
-    run(WP, "write", "伙伴", "relationship", "用户的协作伙伴", d)
+    run(WP, "write", "伙伴", "relationship", "用户的协作伙伴", d, "--confidence", "0.95")
     mem = load(os.path.join(d, "memory.json"))
     check("T9 relationship 默认 core=True", mem[0].get("core") is True, f"core={mem[0].get('core')}")
 
     # 偏好非 core，importance 初始 1.0
-    run(WP, "write", "读书", "preference", "爱读科幻", d)
+    run(WP, "write", "读书", "preference", "爱读科幻", d, "--confidence", "0.95")
     mem = load(os.path.join(d, "memory.json"))
     pref_mem = [m for m in mem if m["entity"] == "读书"][0]
     check("T9 preference 非 core", pref_mem.get("core") is False, f"core={pref_mem.get('core')}")
@@ -195,7 +195,7 @@ def test_core_and_decay():
           f"importance={pref_mem.get('importance')}")
 
     # --core false 可覆盖关系默认
-    run(WP, "write", "同事", "relationship", "普通同事", "--core", "false", refs=d)
+    run(WP, "write", "同事", "relationship", "普通同事", "--core", "false", "--confidence", "0.95", refs=d)
     mem = load(os.path.join(d, "memory.json"))
     colleague = [m for m in mem if m["entity"] == "同事"][0]
     check("T9 --core false 覆盖 relationship", colleague.get("core") is False,
@@ -206,7 +206,7 @@ def test_core_and_decay():
     check("T9 decay 命令成功", out.get("status") == "decayed", f"out={out}")
 
     # 深度验证衰减：造一条 200 天前未召回的记忆 → importance 应 < 1.0
-    run(WP, "write", "旧事", "preference", "一件旧事", d)
+    run(WP, "write", "旧事", "preference", "一件旧事", d, "--confidence", "0.95")
     mem = load(os.path.join(d, "memory.json"))
     old = [m for m in mem if m["entity"] == "旧事"][0]
     old_ts = (datetime.now(timezone(timedelta(hours=8))) - timedelta(days=200)).isoformat(timespec="seconds")
@@ -222,7 +222,7 @@ def test_core_and_decay():
           f"importance={old.get('importance')}")
 
     # core 记忆不参与衰减：关系类 200 天前也不该变
-    run(WP, "write", "锚点关系", "relationship", "核心关系", d)
+    run(WP, "write", "锚点关系", "relationship", "核心关系", d, "--confidence", "0.95")
     mem = load(os.path.join(d, "memory.json"))
     anchor = [m for m in mem if m["entity"] == "锚点关系"][0]
     anchor_ts = (datetime.now(timezone(timedelta(hours=8))) - timedelta(days=200)).isoformat(timespec="seconds")
@@ -246,7 +246,7 @@ def test_v29_human_feel():
     run(WP, "init", "local", d)
 
     # T10: write 带 context（情感锚点）+ expires_at（到期时间）
-    run(WP, "write", "咖啡", "preference", "只喝无糖", d,
+    run(WP, "write", "咖啡", "preference", "只喝无糖", d, "--confidence", "0.95",
         "--context", "说这句话时语气很轻快", "--expires", "2099-01-01", "--emotion-tags", "甜蜜,雀跃")
     mem = load(os.path.join(d, "memory.json"))
     e = [m for m in mem if m["entity"] == "咖啡"][0]
@@ -273,7 +273,7 @@ def test_v29_human_feel():
           "被否认2次的记忆还在检索结果里")
 
     # T12: expire 到期检查——造一条今天到期 → 转 expired 移出检索
-    run(WP, "write", "临时约定", "event", "明天交材料", d, "--expires", "2099-01-01")
+    run(WP, "write", "临时约定", "event", "明天交材料", d, "--expires", "2099-01-01", "--confidence", "0.95")
     mem = load(os.path.join(d, "memory.json"))
     tmpm = [m for m in mem if m["entity"] == "临时约定"][0]
     tmpm["expires_at"] = (datetime.now(timezone(timedelta(hours=8))) - timedelta(hours=1)).isoformat(timespec="seconds")
@@ -288,7 +288,7 @@ def test_v29_human_feel():
           "已到期记忆还在检索结果里")
 
     # T13: recall 主动回忆建议（从未被提起 + 带情感 → 应被挑出）
-    run(WP, "write", "那年夏天", "event", "一起看海", d, "--context", "晚霞把海面染成金色")
+    run(WP, "write", "那年夏天", "event", "一起看海", d, "--context", "晚霞把海面染成金色", "--confidence", "0.95")
     out = json.loads(run(WP, "recall", d))
     check("T13 recall 返回建议", out.get("status") == "recalled" and out.get("results"), f"out={out}")
     values = [r.get("value") for r in out.get("results", [])]

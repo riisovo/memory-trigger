@@ -3,17 +3,11 @@
 # recall_sense.py — pre_llm_call shell hook（薄客户端）
 #
 # 行为：
-#   1) 优先连 recall_daemon 的 UNIX socket，把 {user_message, session_id} 发过去，
-#      直接打印 daemon 回的 {"context":...} 或 "{}"（常驻内存，~100ms，不重载模型）。
-#   2) 连不上 daemon（没起 / 挂了 / 超时）→ 退化回本地 recall_core.decide_and_recall
-#      （向后兼容：模型在子进程里冷启动一次，慢但照常工作）。
-#
-# 2026-08-18 修复（承接严格审查报告）：
-#   · payload 非 dict 直接 noop（P2-3，原 L63 未校验）。
-#   · 去掉 len(msg)>80 硬过滤（P1：长段冷信号也曾漏触发）。
-#   · 多余逗号已无（P2 项）。
-#   · debug 日志统一带 session_id（P2-6）。
-#   · 不再裸 except: pass 吞错：错误走 fallback 或记日志。
+#   1) 优先连 recall_daemon 的 UNIX socket，发送 {user_message, session_id}，
+#      直接输出 daemon 返回的 {"context":...} 或 "{}"（常驻内存，毫秒级响应）。
+#   2) 若 daemon 不可用（未启动 / 超时），自动回退到本地 recall_core.build_injection
+#      （子进程内惰性加载模型并完成判定）。
+#   3) 非法 payload、斜杠命令、定时任务（cron）会话均直接跳过并输出 "{}"。
 
 import json
 import os
@@ -27,9 +21,9 @@ from pathlib import Path
 # 注意：recall_core / recall_vec 不在顶层 import——它们会拉起 fastembed（~300ms 模块加载）。
 # 只有 daemon 连不上、走本地回退时才需要，故在 _fallback 内惰性 import，避免热路径每次付这个税。
 
-REFS_DIR = os.environ.get("RECALL_REFS_DIR", "/home/agent/.hermes/memories/memory-trigger")
-SOCK = os.environ.get("RECALL_SOCK", "/home/agent/.hermes/agent-hooks/recall.sock")
-DEBUG_LOG = Path.home() / ".hermes" / "agent-hooks" / ".recall_sense_debug.log"
+REFS_DIR = os.environ.get("RECALL_REFS_DIR", os.path.expanduser("~/.agent/memories/memory-trigger"))
+SOCK = os.environ.get("RECALL_SOCK", os.path.expanduser("~/.agent/agent-hooks/recall.sock"))
+DEBUG_LOG = Path.home() / ".agent" / "agent-hooks" / ".recall_sense_debug.log"
 SOCK_TIMEOUT = float(os.environ.get("RECALL_SOCK_TIMEOUT", "2.0"))
 
 
@@ -84,7 +78,7 @@ def _ask_daemon(msg, session_id):
 def _fallback(msg, session_id):
     """daemon 不可用时的本地回退：惰性 import recall_core 后跑核心判定（子进程内加载模型，慢但工作）。"""
     try:
-        sys.path.insert(0, "/home/agent/.hermes/memory-trigger-src/references")
+        sys.path.insert(0, os.path.expanduser("~/.agent/memory-trigger-src/references"))
         import recall_core  # 仅在回退时加载 fastembed（热路径不付此税）
         return recall_core.build_injection(msg, session_id, debug=True, refs_dir=REFS_DIR)
     except Exception:

@@ -127,6 +127,20 @@ def _build_report(refs_dir, maint):
             lines.append("  · %s (%s) 已 %s 天没召回" % (ent, kind, age))
     lines.append("")
     lines.append("本周维护: %s" % json.dumps(maint, ensure_ascii=False))
+    # 核心记忆健康检查：扫描是否存在 core=true 但状态为 superseded 的异常条目
+    try:
+        _mem = json.loads(open(os.path.join(refs_dir, "memory.json"), encoding="utf-8").read())
+        _core_dead = [e for e in _mem if isinstance(e, dict)
+                      and e.get("core") and e.get("status") == "superseded"]
+        if _core_dead:
+            lines.append("")
+            lines.append("🚨 core 残骸: %d 条（core 却被标 superseded = 检索看不到，必须人工救回）" % len(_core_dead))
+            for e in _core_dead[:5]:
+                lines.append("  · %s %s" % (e.get("id"), (e.get("value") or "")[:50]))
+        else:
+            lines.append("✅ core 健康: 0 条 core 被静默作废")
+    except Exception as e:
+        lines.append("core 自检跳过: %s" % e)
     if isinstance(maint, dict) and maint.get("unfulfilled_promises"):
         lines.append("")
         lines.append("⚠️ 还没兑现的承诺: %s 条（去 promise check 看明细，兑现后记得 done）" % maint["unfulfilled_promises"])
@@ -177,8 +191,7 @@ def main():
 
     print("[每周维护] refs_dir=%s  dry_run=%s" % (refs_dir, args.dry_run))
     maint = _run_maintenance(refs_dir, args.dry_run)
-    # === PATCH v3.2 === 维护跑完登记时间——maintenance_due 会话内注入以
-    # .last_maintenance 的 mtime 为真相源，不登记则 AI 整周都被提示撞脸。
+    # 维护完成后更新 .last_maintenance 时间戳，供会话内维护到期检查读取
     if not args.dry_run:
         try:
             marker = os.path.join(refs_dir, ".last_maintenance")

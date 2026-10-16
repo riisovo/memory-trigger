@@ -1,7 +1,7 @@
 {
   "name": "memory-trigger",
-  "version": "3.1.0",
-  "description": "AI 伴侣记忆引擎 — 让 Agent 记住用户身份、怎么叫你、你喜欢什么、你们经历过什么",
+  "version": "3.7.0",
+  "description": "伴侣型 Agent 记忆引擎 — 让 Agent 记住用户身份、怎么叫你、你喜欢什么、你们经历过什么",
   "bin": {
     "memory-trigger": "./install.sh"
   },
@@ -10,13 +10,15 @@
     "SKILL.md",
     "README.md",
     "MEMORY_RULES.md",
+    "RECALL.md",
     "SHARE.md",
+    "Agent+MCP接入指南.md",
+    "维护指南.md",
     "references/",
     "scripts/",
-    "test_dual_source.py"
+    "hooks/"
   ],
   "keywords": [
-    "ai",
     "memory",
     "companion",
     "agent",

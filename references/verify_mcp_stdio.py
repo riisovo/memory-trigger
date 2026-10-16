@@ -8,7 +8,7 @@
     python3 references/verify_mcp_stdio.py
 
 它会真实拉起 server 子进程、通过 stdio 传输调用工具，验证：
-  - 19 个 MCP 工具 + 1 个 Prompt 注册齐全
+  - 23 个 MCP 工具 + 1 个 Prompt 注册齐全
   - 双源信任：user_explicit 直接落盘 core 钉死；self_inferred 低置信挂 pending 不进检索
   - 双向遗忘：forget 后检索归零
   - v2.9：情感锚点落库、承诺建档/检查/完成、否认降权
@@ -83,7 +83,7 @@ async def main():
             # ---- v2.9 情感锚点 / 承诺追踪 / 否认降权 ----
             res = await sess.call_tool("memory_write", {
                 "entity": "咖啡", "kind": "preference", "value": "只喝无糖",
-                "refs_dir": refs, "context": "说这句话时语气很轻快",
+                "refs_dir": refs, "context": "说这句话时语气很轻快", "confidence": 0.95,
                 "emotion_tags": "甜蜜,雀跃", "expires_at": "2099-01-01"})
             print("WRITE_CONTEXT(应含 context):", _txt(res))
             res = await sess.call_tool("memory_recall", {"refs_dir": refs})

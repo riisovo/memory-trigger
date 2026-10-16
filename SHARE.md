@@ -26,11 +26,11 @@ zip -r memory-trigger.zip memory-trigger/ -x "*/.git/*" "*/.backup/*" "*/.wal.js
 `install.sh` 会自动跑 `references/test_dual_source.py`，全 PASS 才算装好。手动验证：
 
 ```bash
-python3 references/write_pipeline.py write "读书" preference "爱读科幻小说" references/
+python3 references/write_pipeline.py write "读书" preference "爱读科幻小说" references/ --confidence 0.95
 python3 references/write_pipeline.py search "读书" references/
 python3 references/write_pipeline.py stats references/
 ```
 
 ## 升级
 
-v2.8.x 之后改过的文件都要一起换：`references/write_pipeline.py`、`references/mcp_server.py`、`references/graph_backend.py`、`references/merge_migrate.py`、`SKILL.md`、`references/mcp_requirements.txt`（依赖加上限）。记忆数据 `memory.json` 不受影响（建议先 `backup`）。也可直接用 `patches/` 下的合并补丁本地 apply，无需逐个换文件。
+v2.8.x 之后改过的文件都要一起换：`references/write_pipeline.py`、`references/mcp_server.py`、`references/merge_migrate.py`、`references/recall_*.py`、`hooks/`、`SKILL.md`、`references/mcp_requirements.txt`（依赖加上限）。记忆数据 `memory.json` 不受影响（建议先 `backup`）。

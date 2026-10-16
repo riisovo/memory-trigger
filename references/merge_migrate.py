@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-merge_migrate.py —— 双源记忆合并迁移（PATCH v2.6 by 伙伴）
+merge_migrate.py —— 双源记忆合并迁移工具
 ============================================
-用途：agent "接入记忆技能"时，把两套记忆安全并成一套干净初始库：
-  源 A（文件，权威）：已有的本地 memory.json（如 友商 产物 / 历史沉淀）
-  源 B（自身，缓存）：agent 自述记忆——让它先把自己的印象 dump 成一个文件
+用途：Agent 接入记忆技能时，将两套记忆安全合并为统一的初始记忆库：
+  源 A（文件，权威）：已有的本地 memory.json
+  源 B（自身，缓存）：Agent 自述记忆导出的清单文件
 
-合并规则（信任优先级固化）：
-  1) 实体归一化（别名表 + 反向子串）。
-  2) 按 (entity, kind) 合并去重；同一 (entity,kind) 文件侧 active 优先，自身侧被丢弃
-     （除非文件侧为空 → 自身侧保留，但标 source=self_inferred，
-      低置信 → status=pending 不进 active，等用户确认再升级）。
-  3) 冲突检测：若文件侧与自身侧都 active 且 value 不同 → 以文件为准，自身侧记为
-     "被覆盖"（写入报告，不进库），避免"两套记忆互相矛盾"。
-  4) 字段校验（防 示例式字段错位）：kind 必须 ∈ ALLOWED_KINDS；value 非空且
-     不等于某个 kind 关键字（如误把 "event" 写进 value）。不合规项跳过并报告。
-  5) 不删文件侧任何历史（superseded 保留）；只补自身侧沉淀。
+合并规则（信任优先级）：
+  1) 实体归一化（基于别名表映射）。
+  2) 按 (entity, kind) 合并去重；同一 (entity, kind) 下文件侧 active 优先保留，
+     若文件侧无对应条目，则将自身侧沉淀为 source=self_inferred（默认 status=pending，
+     待后续被明确确认后自动转正）。
+  3) 冲突消解：若文件侧与自身侧均为 active 且内容不同，以文件侧为准，自身侧记入合并报告。
+  4) 字段校验：kind 必须属于 ALLOWED_KINDS；value 非空且不得为 kind 枚举关键字，不合规项跳过并记入报告。
+  5) 历史保留：完整保留文件侧的 superseded 历史记录。
 
 输出：
   <out_dir>/memory.json        合并后干净库（覆盖写，先备份原文件）
@@ -124,7 +122,7 @@ def parse_self_memory(path, fmt):
 
 
 def validate(entry):
-    """返回 (ok, reason)。防 示例式字段错位。"""
+    """校验记忆条目字段合法性，返回 (ok, reason)。"""
     ent = entry.get("entity", "")
     kind = entry.get("kind", "")
     val = entry.get("value", "")

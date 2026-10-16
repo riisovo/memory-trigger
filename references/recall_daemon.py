@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# recall_daemon.py — 主动回忆常驻守护进程（根治 P0-1 每条消息 0.5~0.8s 阻塞 + P0-2 首建缓存 12s）
+# recall_daemon.py — 主动回忆常驻守护进程
 #
-# 思路：模型 / 锚点向量 / 记忆向量常驻内存，永不在每条消息时重载。钩子改成薄客户端，
-#       连 socket 发 {user_message, session_id}，daemon 直接在内存里 embed+判定+检索，~100ms 返回。
-#       连不上 daemon（daemon 挂了 / 没起）→ 钩子退化回本地 recall_core.decide_and_recall（向后兼容）。
-#
-# 内存自愈：memory.json 的 mtime 变动后，下一次请求在内存里重算一次记忆向量（仅那一次稍慢），之后继续常驻。
-# 模型加载一次性成本（~12s）只在 daemon 启动时发生，不在每条消息上。
+# 核心机制：
+#   · 模型、锚点向量与记忆向量常驻内存，客户端钩子通过 UNIX socket 发送 {user_message, session_id}，
+#     daemon 在内存内完成向量化、情绪判定与记忆召回，毫秒级返回。
+#   · 若 daemon 未启动或不可达，客户端钩子自动回退到本地 recall_core.build_injection。
+#   · 内存热更新（双缓冲）：检测到 memory.json 的 mtime 变化时，后台线程异步增量重算向量并原子替换，
+#     当前请求继续使用现有内存向量，零阻塞。
 #
 # 协议（UNIX stream socket，4 字节大端长度前缀 + JSON UTF-8）：
 #   请求：{"user_message": "...", "session_id": "..."}   探测：{"ping": true}
-#   响应：{"context": "..."}（命中） / "{}"（未命中/冷却/出错，等价于钩子 noop） / {"pong": true}（探测）
+#   响应：{"context": "..."}（命中） / "{}"（未命中/冷却/出错） / {"pong": true}（探测）
 
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -30,8 +31,9 @@ sys.path.insert(0, str(HERE))
 import recall_vec  # noqa: E402
 import recall_core  # noqa: E402
 
-REFS_DIR = os.environ.get("RECALL_REFS_DIR", "/home/agent/.hermes/memories/memory-trigger")
-SOCK = os.environ.get("RECALL_SOCK", os.path.expanduser("~/.cache/recall.sock"))
+
+REFS_DIR = os.environ.get("RECALL_REFS_DIR", os.path.expanduser("~/.agent/memories/memory-trigger"))
+SOCK = os.environ.get("RECALL_SOCK", os.path.expanduser("~/.agent/agent-hooks/recall.sock"))
 LOG = os.environ.get("RECALL_DAEMON_LOG", str(Path(SOCK).with_suffix(".sock.log")))
 DAEMON_DEBUG = os.environ.get("RECALL_DAEMON_DEBUG", "1") == "1"
 
@@ -65,12 +67,7 @@ def _preload():
 
 
 def _reload_background(refs_dir):
-    """后台增量重算记忆向量，算完热切换（双缓冲，非阻塞请求）。
-
-    根治：memory.json 变动后旧逻辑在请求线程里【同步全量】重算 30~77s，
-    客户端 20s 超时断开 → BrokenPipeError → 那轮回忆失效(noop)。
-    现改为后台线程增量重算，当前请求立刻返回旧向量（永不断档），算完再无锁热切换。
-    """
+    """后台线程增量重算记忆向量并热切换（双缓冲，不阻塞当前请求）。"""
     global _vectors, _vectors_mtime
     try:
         t0 = time.time()
@@ -127,6 +124,20 @@ def _frame_send(conn, data):
     conn.sendall(struct.pack(">I", len(data)) + data)
 
 
+# 剥离宿主可能附加在消息体内的设备状态或回复格式指令段，避免稀释用户原始语句的语义向量。
+_TAIL_INSTRUCT_RE = re.compile(r"〔[^\n]*?(回复格式|下面是|以下是|格式要求|说话方式|系统提示)[^\n]*?〕[\s\S]*$")
+_DEVICE_SEG_RE = re.compile(r"[（(](?:用户的手机此刻|用户的设备|设备状态|手机状态|用户的手表)[^）)]*[）)]")
+
+
+def _clean_user_text(raw):
+    """剥掉注入到消息里的元数据段与格式指令段，只留用户真正说的话；剥空则回退原文。"""
+    t = str(raw or "")
+    t = _TAIL_INSTRUCT_RE.sub("", t)
+    t = _DEVICE_SEG_RE.sub("", t)
+    t = re.sub(r"\s+", " ", t).strip(" \n\t　")
+    return t or str(raw or "").strip()
+
+
 def _handle(conn):
     try:
         body = _frame_recv(conn)
@@ -148,10 +159,12 @@ def _handle(conn):
         if not msg:
             _frame_send(conn, b"{}")
             return
+        msg_user = _clean_user_text(msg)
         t0 = time.time()
         result = recall_core.build_injection(
-            msg, session_id, debug=DAEMON_DEBUG, vectors=_get_vectors(), refs_dir=REFS_DIR)
+            msg_user, session_id, debug=DAEMON_DEBUG, vectors=_get_vectors(), refs_dir=REFS_DIR)
         dt = time.time() - t0
+
 
         if result is None:
             _log("req session=%s -> noop (%.1fms)" % (session_id, dt * 1000))
@@ -175,7 +188,7 @@ _bark_last = [0.0]
 _bark_dedup = [None, None, 0.0]   # [title, body, ts] 进程内同内容去重（90s 内不重推）
 import json as _json
 _BARK_RECENT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recall_bark_recent.json")
-BARK_DEDUP_WINDOW = 6 * 3600      # 6 小时内正文完全相同，绝不重推（根治 free 池抽风→兜底模板每 20min 撞同一条逐字重复）
+BARK_DEDUP_WINDOW = 6 * 3600      # 6 小时内相同正文不重复推送
 _bark_recent = []                 # [{"b": 正文(去空白), "t": 时间戳}, ...]（跨重启持久化）
 try:
     with open(_BARK_RECENT_FILE, encoding="utf-8") as _fh:
@@ -194,9 +207,8 @@ def _bark_persist():
 
 
 def _bark(title, body):
-    """推用户手机。key 取 env BARK_KEY，其次 agent-hooks/.bark_key 文件。
-    两道去重：① 同标题+同内容 90s 内不重推（挡 tick 重跑/调试连发）；
-    ② 同正文 6h 内不重推（根治 free 池抽风→兜底模板每 20min 撞同一条逐字重复）。"""
+    """推送手机通知。优先读取环境变量 BARK_KEY，其次读取同目录 .bark_key 文件。
+    内置两级去重：① 同标题+同内容 90s 内去重；② 同正文 6h 内跨重启去重。"""
     import time as _t
     _n = _t.time()
     _norm = (body or "").strip()
@@ -215,7 +227,7 @@ def _bark(title, body):
             key = ""
     if not key:
         return False
-    icon = ""
+    icon = os.environ.get("BARK_ICON", "")  # 可选：自定义通知图标 URL
     url = "https://api.day.app/%s/%s/%s?isArchive=1&icon=%s" % (
         key, urllib.parse.quote(title, safe=""), urllib.parse.quote(body, safe=""),
         urllib.parse.quote(icon, safe=""))
@@ -247,7 +259,7 @@ def _bark(title, body):
 
 
 def _promise_bark_loop():
-    """user-facing 闭环：每 30min 巡检逾期承诺，有就推 Bark（6h 内不重复）。"""
+    """面向用户的闭环：每 30min 巡检逾期承诺，有就推 Bark（6h 内不重复）。"""
     while not _shutdown.is_set():
         try:
             due = recall_core._due_promises(REFS_DIR)
@@ -255,7 +267,7 @@ def _promise_bark_loop():
             now = time.time()
             if overdue and (now - _bark_last[0]) >= PROMISE_BARK_GAP:
                 body = "\n".join("· %s（已逾期%s天）" % (d["text"][:60], d["days_overdue"]) for d in overdue[:5])
-                if _bark("他待兑现的承诺还没兑现", body):
+                if _bark("他欠你的承诺还没兑现", body):
                     _bark_last[0] = now
                     _log("promise bark pushed, %d overdue" % len(overdue))
         except Exception:

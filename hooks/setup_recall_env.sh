@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # setup_recall_env.sh — 主动回忆 daemon 一键部署（幂等，全程可见进度）
 # 作用：建自包含 venv、装 fastembed+numpy、复制模型缓存到稳定目录、加载 launchd 守护、健康检查。
-# 运行：bash /home/agent/.hermes/agent-hooks/setup_recall_env.sh
+# 运行：bash ~/.agent/agent-hooks/setup_recall_env.sh
 # 说明：装 fastembed 会下载 onnxruntime/tokenizers 等依赖（几十 MB，1–3 分钟），请耐心等待，勿中断。
 set -uo pipefail
 
-HERMES=/home/agent/.hermes
-HOOKS=$HERMES/agent-hooks
+AGENT="${AGENT_HOME:-$HOME/.agent}"
+HOOKS=$AGENT/agent-hooks
 VENV=$HOOKS/venv
-PLIST=$HOOKS/com.hermes-recall-daemon.plist
-STABLE_CACHE=/home/agent/.cache/fastembed_cache
+PLIST=$HOOKS/com.agent-recall-daemon.plist
+STABLE_CACHE="${FASTEMBED_CACHE_DIR:-$HOME/.cache/fastembed_cache}"
 
-fail() { echo ""; echo "✗ 出错：$1"; echo "  把上面整段输出发给我即可。"; exit 1; }
+fail() { echo ""; echo "✗ 出错：$1"; echo "  排查上方输出后重跑；仍失败请带完整输出寻求帮助。"; exit 1; }
 
 echo "==> [1/5] 选择 python"
 PY=$(command -v python3 || true)
@@ -28,7 +28,7 @@ fi
 
 echo "==> [3/5] 模型缓存（离线，需已存在一份 bge 模型）"
 SRCC=""
-for cand in "$STABLE_CACHE" "$HOME/.cache/fastembed_cache" "$(python3 -c 'import tempfile,os;print(os.path.join(tempfile.gettempdir(),"fastembed_cache"))' 2>/dev/null || true)"; do
+for cand in "$STABLE_CACHE" "$HOME/.cache/fastembed_cache" "$("$PY" -c 'import tempfile,os;print(os.path.join(tempfile.gettempdir(),"fastembed_cache"))' 2>/dev/null || true)"; do
   if [ -n "$cand" ] && [ -d "$cand/models--Qdrant--bge-small-zh-v1.5" ]; then SRCC="$cand"; break; fi
 done
 if [ -z "$SRCC" ]; then
@@ -45,8 +45,8 @@ launchctl load "$PLIST" || fail "launchctl load 失败"
 sleep 2
 
 echo "==> [5/5] 健康检查"
-if [ -S "$HERMES/agent-hooks/recall.sock" ]; then
-  PONG=$("$VENV/bin/python" - "$HERMES/agent-hooks/recall.sock" <<'PY' 2>/dev/null || true
+if [ -S "$AGENT/agent-hooks/recall.sock" ]; then
+  PONG=$("$VENV/bin/python" - "$AGENT/agent-hooks/recall.sock" <<'PY' 2>/dev/null || true
 import socket, json, struct, sys
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(2.0)
 s.connect(sys.argv[1])

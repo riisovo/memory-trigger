@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memory-trigger-mcp"
-version = "3.1.0"
-description = "给 AI 挂上「不会被上下文压没、还会主动惦记你」的长期记忆：承诺闭环、主动回忆钩子、双源信任。"
+version = "3.7.0"
+description = "给 Agent 挂上「不会被上下文压没、还会主动惦记你」的长期记忆：承诺闭环、主动回忆钩子、双源信任。"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
